@@ -13,7 +13,6 @@ ground_truth_50w/
 saved_models/
 pretrained_graph/
 ann_artifacts/
-case_study/
 log/
 *.npy
 *.npz

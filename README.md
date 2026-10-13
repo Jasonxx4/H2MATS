@@ -20,7 +20,6 @@ H²MATS learns trajectory embeddings that approximate a road-network trajectory 
 | Hash heads | `hash_global.py`, `hash_global_pipeline.py`, `run_hash_global_all.py`, `trajectory_embedding.py`, `build_head_training_set.py`, `build_large_scale_head_training.py`, `build_validation_metric_distances.py`, `build_validation_union_tp_teacher.py` |
 | Candidate selection | `run_adaptive_topo_hash_checkpoint.py`, `topo_route_hash_large_scale.py`, `dual_metric_fusion.py`, `hier_hash_large_scale.py`, `hier_hash_fusion.py`, `trajectory_metric_backend.py`, `tp_retrieval_evaluation.py`, `ann_index.py`, `ann_pipeline.py`, `paired_retrieval_experiment.py` |
 | Large-scale benchmark | `build_augmented_tp_benchmark.py`, `restore_benchmark_coordinates.py`, `reencode_embedding_payload.py`, `run_augmented_tp_experiment.py`, `hnsw_large_scale.py` |
-| Case study and figures | `export_case_retrieval.py`, `plot_case_study.py`, `plot_hierarchy_partitions.py` |
 | Experiment scripts | `scripts/*.sh` |
 | Unit tests | `tests/` |
 
@@ -132,16 +131,6 @@ bash scripts/run_large_scale_emb_hnsw.sh   # Emb-HNSW baseline
 ```
 
 All scripts read their paths and devices from environment variables such as `H2MATS_DATASET`, `H2MATS_DISTANCE_TYPE`, `H2MATS_BENCHMARK_DIR`, `H2MATS_GALLERY_FILE`, `H2MATS_QUERY_FILE`, `H2MATS_HASH_ASSETS_DIR`, `H2MATS_HASH_CUDA`, and `H2MATS_MODEL_CUDA`. Set `H2MATS_DRY_RUN=1` to print a command without running it. The exact distance table for 2,000 queries over one million trajectories takes about 8 GB of disk space and is cached after the first run.
-
-## Case study and hierarchy figures
-
-```bash
-python export_case_retrieval.py --dataset porto --distance-type TP \
-    --ours-checkpoint saved_models/porto/TP_<run>/epoch_49.pt \
-    --spgmt-checkpoint saved_models/porto/TP_<spgmt_run> --cuda 0
-python plot_case_study.py --input case_study/porto_TP_retrieval.npz
-python plot_hierarchy_partitions.py --dataset porto
-```
 
 ## Tests
 
