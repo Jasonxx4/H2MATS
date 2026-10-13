@@ -111,10 +111,8 @@ The first run exports the embeddings and trains the base and metric hash heads i
 | Option | Value | Meaning |
 | --- | --- | --- |
 | `--hamming-candidates` | 768 | base candidates from the code scan |
-| `--adaptive-global-margin` | 0.02 | confidence threshold on the normalized Hamming margin |
 | `--adaptive-max-tp-fraction` | 0.1 | query budget for candidate augmentation and exact reranking |
 | `--max-route-candidates` | 192 | cap on hierarchical candidates |
-| `--dual-metric-high-quality-tp-candidates`, `--dual-metric-tp-candidates`, `--dual-metric-hard-tp-candidates` | 64, 128, 160 | difficulty-dependent rerank budgets |
 
 ## Large-scale experiments
 
