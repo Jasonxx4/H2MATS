@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Data and generated artifacts
+dataset/
+data/
+ground_truth/
+ground_truth_full/
+ground_truth_50w/
+saved_models/
+pretrained_graph/
+ann_artifacts/
+case_study/
+log/
+*.npy
+*.npz
+*.pt
+*.pth
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

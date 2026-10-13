@@ -1,0 +1,9 @@
+torch>=2.0
+torch_geometric>=2.3
+numpy
+pandas
+networkx>=2.8
+numba
+hnswlib
+tqdm
+matplotlib
