@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from hier_hash_large_scale import (
+from hierarchical_code_large_scale import (
     _candidate_overlap_summary,
     _evaluate_method,
     gallery_composition,
@@ -13,7 +13,7 @@ from hier_hash_large_scale import (
 )
 
 
-class HierHashLargeScaleHelpersTest(unittest.TestCase):
+class HierarchicalCodeLargeScaleHelpersTest(unittest.TestCase):
     def test_candidate_overlap_summary_reports_exclusive_and_union_counts(self):
         summary = _candidate_overlap_summary(
             [np.asarray([1, 2, 2, 3]), np.asarray([5])],
@@ -211,11 +211,11 @@ class HierHashLargeScaleHelpersTest(unittest.TestCase):
             normalize = False
             metric = "l2"
 
-        class HashIndex:
+        class CodeIndex:
             config = Config()
 
         class Index:
-            hash_index = HashIndex()
+            code_index = CodeIndex()
 
         query_embeddings = np.asarray([[0.0, 0.0]], dtype=np.float32)
         query_trajectories = np.empty(1, dtype=object)
@@ -245,11 +245,11 @@ class HierHashLargeScaleHelpersTest(unittest.TestCase):
             normalize = False
             metric = "l2"
 
-        class HashIndex:
+        class CodeIndex:
             config = Config()
 
         class Index:
-            hash_index = HashIndex()
+            code_index = CodeIndex()
 
             def query(self, *args, **kwargs):
                 return np.asarray([0]), np.asarray([0.0]), {
@@ -276,7 +276,7 @@ class HierHashLargeScaleHelpersTest(unittest.TestCase):
         query_trajectories = np.empty(1, dtype=object)
         query_trajectories[0] = np.asarray([0, 1], dtype=np.int64)
         result = _evaluate_method(
-            "hier-hash",
+            "hier-code",
             Index(),
             np.asarray([[0.0, 0.0]], dtype=np.float32),
             query_trajectories,

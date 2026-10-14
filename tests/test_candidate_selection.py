@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 import numpy as np
 
-from topo_route_hash_large_scale import (
+from candidate_selection import (
     CompactPostingIndex,
-    TopoRouteHashConfig,
-    TopoRouteHashIndex,
-    AdaptiveTopoHashIndex,
+    CandidateSelectionConfig,
+    CandidateSelectionIndex,
+    AdaptiveCandidateSelectionIndex,
     _compressed_level_path,
     _candidate_label_stats,
     _candidate_retention_stats,
@@ -20,7 +20,7 @@ from topo_route_hash_large_scale import (
     _method_comparison,
     _evaluate_method,
     _global_top50_diagnostics,
-    _query_global_hash_tp,
+    _query_code_scan_tp,
     _minhash_signature,
     _select_low_confidence_queries,
     _path_tokens,
@@ -30,49 +30,49 @@ from topo_route_hash_large_scale import (
 from tp_retrieval_evaluation import tp_retrieval_metrics
 
 
-class TopoRouteHashHelpersTest(unittest.TestCase):
+class CandidateSelectionHelpersTest(unittest.TestCase):
     def test_large_scale_cli_accepts_metric_head_and_learned_weights(self):
         args = parse_args([
             "--gallery-file", "gallery.npz",
             "--query-file", "query.npz",
-            "--hash-model-file", "candidate.pt",
-            "--metric-hash-model-file", "metric.pt",
+            "--code-model-file", "candidate.pt",
+            "--metric-code-model-file", "metric.pt",
             "--dual-metric-weight-file", "weights.json",
             "--hierarchy-dir", "hierarchy",
             "--output-dir", "output",
-            "--methods", "adaptive-dual-metric,global-hash",
+            "--methods", "adaptive-dual-metric,code-scan",
             "--dual-metric-embedding-weight", "0.96",
-            "--dual-metric-hash-weight", "0.02",
+            "--dual-metric-code-weight", "0.02",
             "--dual-metric-topology-weight", "0.02",
         ])
-        self.assertEqual(args.metric_hash_model_file, "metric.pt")
+        self.assertEqual(args.metric_code_model_file, "metric.pt")
         self.assertEqual(args.dual_metric_weight_file, "weights.json")
         self.assertAlmostEqual(args.dual_metric_embedding_weight, 0.96)
 
-    def test_global_hash_rerank_mode_is_explicit_and_preserves_default(self):
+    def test_code_scan_rerank_mode_is_explicit_and_preserves_default(self):
         base = [
             "--gallery-file", "gallery.npz",
             "--query-file", "query.npz",
-            "--hash-model-file", "candidate.pt",
+            "--code-model-file", "candidate.pt",
             "--hierarchy-dir", "hierarchy",
             "--output-dir", "output",
-            "--methods", "global-hash",
-            "--hash-backend", "flat",
+            "--methods", "code-scan",
+            "--code-backend", "flat",
         ]
-        self.assertEqual(parse_args(base).global_hash_rerank_mode, "full")
-        args = parse_args(base + ["--global-hash-rerank-mode", "hash-only"])
-        self.assertEqual(args.global_hash_rerank_mode, "hash-only")
+        self.assertEqual(parse_args(base).code_scan_rerank_mode, "full")
+        args = parse_args(base + ["--code-scan-rerank-mode", "code-only"])
+        self.assertEqual(args.code_scan_rerank_mode, "code-only")
         tp_args = parse_args(base + [
             "--hamming-candidates", "64",
-            "--global-hash-rerank-mode", "tp",
+            "--code-scan-rerank-mode", "tp",
             "--rerank-metric", "TP",
         ])
         self.assertEqual(tp_args.hamming_candidates, 64)
-        self.assertEqual(tp_args.global_hash_rerank_mode, "tp")
+        self.assertEqual(tp_args.code_scan_rerank_mode, "tp")
         self.assertEqual(tp_args.rerank_metric, "TP")
 
-    def test_global_hash_tp_reranks_all_queries_and_matches_r1_plateau(self):
-        class FakeHashIndex:
+    def test_code_scan_tp_reranks_all_queries_and_matches_r1_plateau(self):
+        class FakeCodeIndex:
             def __init__(self):
                 self.config = SimpleNamespace(hamming_candidates=64)
                 self.calls = []
@@ -122,16 +122,16 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
         source_ids = np.arange(70, dtype=np.int64)
         source_ids[10] = 1000
         source_ids[69] = 1001
-        hash_index = FakeHashIndex()
+        code_index = FakeCodeIndex()
         backend = FakeTPBackend()
         index = SimpleNamespace(
-            hash_index=hash_index,
+            code_index=code_index,
             trajectories=gallery_trajectories,
             exclude_self=False,
         )
 
         result, predictions = _evaluate_method(
-            "global-hash",
+            "code-scan",
             index,
             np.zeros((2, 1), dtype=np.float32),
             query_trajectories,
@@ -142,10 +142,10 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
             query_codes=np.zeros((2, 1), dtype=np.uint8),
             top_k=50,
             metric_backend=backend,
-            global_hash_rerank_mode="tp",
+            code_scan_rerank_mode="tp",
         )
 
-        self.assertEqual(hash_index.calls, [(64, 50, None), (64, 50, None)])
+        self.assertEqual(code_index.calls, [(64, 50, None), (64, 50, None)])
         self.assertEqual(backend.calls, [(100, 64), (101, 64)])
         self.assertEqual(predictions[0][0], 10)  # TP tie breaks by Gallery row ID.
         self.assertNotIn(62, predictions[0])  # Non-finite TP distances are dropped.
@@ -169,11 +169,11 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
         self.assertEqual(tp_metrics["r1_at_10"], 0.5)
         self.assertEqual(tp_metrics["r1_at_50"], 0.5)
 
-    def test_global_hash_tp_calls_real_trajectory_distance_backend(self):
-        from hash_global import HashGlobalConfig
+    def test_code_scan_tp_calls_real_trajectory_distance_backend(self):
+        from binary_codes import BinaryCodeIndexConfig
 
-        class FakeHashIndex:
-            config = HashGlobalConfig(
+        class FakeCodeIndex:
+            config = BinaryCodeIndexConfig(
                 bits=16, backend="flat", hamming_candidates=64
             )
 
@@ -200,9 +200,9 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
                 for row_id in range(70):
                     trajectories[row_id] = np.asarray([row_id], dtype=np.int64)
                 index = SimpleNamespace(
-                    hash_index=FakeHashIndex(), trajectories=trajectories
+                    code_index=FakeCodeIndex(), trajectories=trajectories
                 )
-                ids, distances, details = _query_global_hash_tp(
+                ids, distances, details = _query_code_scan_tp(
                     index,
                     np.asarray([10], dtype=np.int64),
                     np.asarray([0, 0], dtype=np.uint8),
@@ -217,8 +217,8 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
         self.assertTrue(np.all(np.diff(distances) >= 0.0))
         self.assertEqual(details["rerank_candidate_count"], 64)
 
-    def test_global_hash_hash_only_mode_is_forwarded_to_index_query(self):
-        class FakeHashIndex:
+    def test_code_scan_code_only_mode_is_forwarded_to_index_query(self):
+        class FakeCodeIndex:
             def __init__(self):
                 self.rerank_mode = None
 
@@ -233,12 +233,12 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
                     },
                 )
 
-        hash_index = FakeHashIndex()
-        index = SimpleNamespace(hash_index=hash_index, exclude_self=False)
+        code_index = FakeCodeIndex()
+        index = SimpleNamespace(code_index=code_index, exclude_self=False)
         query_trajectories = np.empty(1, dtype=object)
         query_trajectories[0] = np.asarray([1, 2], dtype=np.int64)
         _evaluate_method(
-            "global-hash",
+            "code-scan",
             index,
             np.asarray([[0.0]], dtype=np.float32),
             query_trajectories,
@@ -248,24 +248,24 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
             np.asarray([True]),
             query_codes=np.asarray([[0]], dtype=np.uint8),
             top_k=1,
-            global_hash_rerank_mode="hash-only",
+            code_scan_rerank_mode="code-only",
         )
-        self.assertEqual(hash_index.rerank_mode, "hash-only")
+        self.assertEqual(code_index.rerank_mode, "code-only")
 
     @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "torch required")
-    def test_global_hash_only_build_skips_hierarchy_and_topology_postings(self):
-        from hash_global import BinaryHashHead, HashHeadConfig
+    def test_code_scan_only_build_skips_hierarchy_and_topology_postings(self):
+        from binary_codes import BinaryCodeEncoder, CodeEncoderConfig
 
         with tempfile.TemporaryDirectory() as directory:
             args = parse_args([
                 "--gallery-file", "gallery.npz",
                 "--query-file", "query.npz",
-                "--hash-model-file", "candidate.pt",
+                "--code-model-file", "candidate.pt",
                 "--hierarchy-dir", f"{directory}/missing-hierarchy",
                 "--output-dir", f"{directory}/output",
-                "--methods", "global-hash",
-                "--hash-backend", "flat",
-                "--hash-device", "cpu",
+                "--methods", "code-scan",
+                "--code-backend", "flat",
+                "--code-device", "cpu",
                 "--hamming-candidates", "5",
             ])
             trajectories = np.empty(2, dtype=object)
@@ -275,13 +275,13 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
                 "embeddings": np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
                 "trajectories": trajectories,
             }
-            head = BinaryHashHead(HashHeadConfig(input_dim=2, bits=16, hidden_dim=8))
+            head = BinaryCodeEncoder(CodeEncoderConfig(input_dim=2, bits=16, hidden_dim=8))
             scale_dir = f"{directory}/output/gallery_2"
-            with patch("hash_global.load_hash_head", return_value=(head, {})):
+            with patch("binary_codes.load_code_encoder", return_value=(head, {})):
                 index, report = _build_index(
                     args, gallery, np.asarray([0, 1], dtype=np.int64), scale_dir
                 )
-            self.assertIsNone(index.metric_hash_index)
+            self.assertIsNone(index.metric_code_index)
             self.assertEqual(report["topo_seconds"], 0.0)
             self.assertEqual(report["topo_disk_mb"], 0.0)
             self.assertFalse(os.path.exists(f"{scale_dir}/topo_index"))
@@ -296,9 +296,9 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
         np.testing.assert_array_equal(selected, [True, False, False, True, False])
 
     def test_config_defaults_tp_fraction_cap_to_fifteen_percent(self):
-        self.assertEqual(TopoRouteHashConfig().adaptive_max_tp_fraction, 0.15)
+        self.assertEqual(CandidateSelectionConfig().adaptive_max_tp_fraction, 0.15)
         with self.assertRaises(ValueError):
-            TopoRouteHashConfig(adaptive_max_tp_fraction=1.01).validate()
+            CandidateSelectionConfig(adaptive_max_tp_fraction=1.01).validate()
 
     def test_global_top50_diagnostics_separate_pool_and_final_retention(self):
         diagnostics = _global_top50_diagnostics(
@@ -336,8 +336,8 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
     def test_method_comparison_accepts_adaptive_topology_results(self):
         comparison = _method_comparison(
             {
-                "adaptive-topo-hash": [np.asarray([0], dtype=np.int64)],
-                "global-hash": [np.asarray([1], dtype=np.int64)],
+                "adaptive-selection": [np.asarray([0], dtype=np.int64)],
+                "code-scan": [np.asarray([1], dtype=np.int64)],
             },
             np.asarray([10], dtype=np.int64),
             np.asarray([10, 20], dtype=np.int64),
@@ -415,13 +415,13 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
         self.assertAlmostEqual(stats["truth_top10_retention"], 3.0 / 5.0)
         self.assertAlmostEqual(stats["truth_top50_retention"], 3.0 / 5.0)
 
-    def test_hash_aware_metric_prefilter_uses_query_code(self):
-        class HashConfig:
+    def test_code_aware_metric_prefilter_uses_query_code(self):
+        class CodeConfig:
             normalize = False
             metric = "l2"
 
-        class FakeHashIndex:
-            config = HashConfig()
+        class FakeCodeIndex:
+            config = CodeConfig()
             embeddings = np.asarray(
                 [[0.0], [0.1], [0.2], [10.0]], dtype=np.float32
             )
@@ -437,15 +437,15 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
             "node_to_l3": np.zeros(2, dtype=np.int64),
             "l3_edges": np.empty((0, 2), dtype=np.int64),
         }
-        config = TopoRouteHashConfig(
+        config = CandidateSelectionConfig(
             metric_prefilter_candidates=2,
             metric_prefilter_high_quality_candidates=2,
             metric_prefilter_global_protect=0,
             metric_prefilter_structural_protect=0,
             metric_prefilter_embedding_weight=0.0,
-            metric_prefilter_hash_weight=1.0,
+            metric_prefilter_code_weight=1.0,
         )
-        index = AdaptiveTopoHashIndex(FakeHashIndex(), hierarchy, config).build(
+        index = AdaptiveCandidateSelectionIndex(FakeCodeIndex(), hierarchy, config).build(
             trajectories
         )
         # The Global candidate code space ranks ID 3 first, whereas the
@@ -462,13 +462,13 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
         np.testing.assert_array_equal(selected, [1, 2])
         self.assertEqual(details["metric_prefilter_candidate_count"], 2)
 
-    def test_soft_hash_metric_prefilter_uses_continuous_metric_codes(self):
-        class HashConfig:
+    def test_soft_code_metric_prefilter_uses_continuous_metric_codes(self):
+        class CodeConfig:
             normalize = False
             metric = "l2"
 
-        class FakeHashIndex:
-            config = HashConfig()
+        class FakeCodeIndex:
+            config = CodeConfig()
             embeddings = np.asarray(
                 [[0.0], [0.1], [0.2], [0.3]], dtype=np.float32
             )
@@ -482,16 +482,16 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
             "node_to_l3": np.zeros(2, dtype=np.int64),
             "l3_edges": np.empty((0, 2), dtype=np.int64),
         }
-        config = TopoRouteHashConfig(
+        config = CandidateSelectionConfig(
             metric_prefilter_candidates=2,
             metric_prefilter_high_quality_candidates=2,
             metric_prefilter_global_protect=0,
             metric_prefilter_structural_protect=0,
             metric_prefilter_embedding_weight=0.0,
-            metric_prefilter_hash_weight=1.0,
-            metric_prefilter_hash_score="soft",
+            metric_prefilter_code_weight=1.0,
+            metric_prefilter_code_score="soft",
         )
-        index = AdaptiveTopoHashIndex(FakeHashIndex(), hierarchy, config).build(
+        index = AdaptiveCandidateSelectionIndex(FakeCodeIndex(), hierarchy, config).build(
             trajectories
         )
         index.metric_prefilter_soft_codes = np.asarray(
@@ -530,13 +530,13 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
         np.testing.assert_array_equal(postings.lookup(1), [0, 1, 2])
         self.assertEqual(len(postings.lookup_many([1, 2, 3], candidate_cap=2)), 2)
 
-    def test_topology_route_can_rescue_a_positive_missing_from_global_hash(self):
-        class HashConfig:
+    def test_topology_route_can_rescue_a_positive_missing_from_code_scan(self):
+        class CodeConfig:
             normalize = False
             metric = "l2"
 
-        class FakeHashIndex:
-            config = HashConfig()
+        class FakeCodeIndex:
+            config = CodeConfig()
             embeddings = np.asarray(
                 [[0.0, 0.0], [0.2, 0.0], [2.0, 0.0], [3.0, 0.0]],
                 dtype=np.float32,
@@ -562,7 +562,7 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
             "node_to_l3": np.asarray([0, 0, 0, 0, 1, 1, 1, 1]),
             "l3_edges": np.asarray([[0, 1]], dtype=np.int64),
         }
-        config = TopoRouteHashConfig(
+        config = CandidateSelectionConfig(
             minhash_size=4,
             postings_per_level=2,
             min_route_candidates=1,
@@ -572,7 +572,7 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
             max_rerank_candidates=4,
             embedding_weight=0.8,
         )
-        index = TopoRouteHashIndex(FakeHashIndex(), hierarchy, config).build(
+        index = CandidateSelectionIndex(FakeCodeIndex(), hierarchy, config).build(
             trajectories
         )
         ids, _, details = index.query(
@@ -588,12 +588,12 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
         self.assertTrue(details["top1_from_struct_only"])
 
     def test_global_only_mode_reranks_global_candidates_without_route_postings(self):
-        class HashConfig:
+        class CodeConfig:
             normalize = False
             metric = "l2"
 
-        class FakeHashIndex:
-            config = HashConfig()
+        class FakeCodeIndex:
+            config = CodeConfig()
             embeddings = np.asarray(
                 [[0.0, 0.0], [0.2, 0.0], [2.0, 0.0], [3.0, 0.0]],
                 dtype=np.float32,
@@ -619,7 +619,7 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
             "node_to_l3": np.asarray([0, 0, 0, 0, 1, 1, 1, 1]),
             "l3_edges": np.asarray([[0, 1]], dtype=np.int64),
         }
-        config = TopoRouteHashConfig(
+        config = CandidateSelectionConfig(
             candidate_source="global-only",
             minhash_size=4,
             postings_per_level=2,
@@ -630,7 +630,7 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
             max_rerank_candidates=4,
             embedding_weight=0.8,
         )
-        index = TopoRouteHashIndex(FakeHashIndex(), hierarchy, config).build(
+        index = CandidateSelectionIndex(FakeCodeIndex(), hierarchy, config).build(
             trajectories
         )
         ids, _, details = index.query(
@@ -649,15 +649,15 @@ class TopoRouteHashHelpersTest(unittest.TestCase):
         self.assertEqual(details["final_struct_only"], 0)
 
     def test_grouped_metrics_follow_exact_query_limit_and_metadata(self):
-        class HashConfig:
+        class CodeConfig:
             normalize = False
             metric = "l2"
 
-        class FakeHashIndex:
-            config = HashConfig()
+        class FakeCodeIndex:
+            config = CodeConfig()
 
         class FakeIndex:
-            hash_index = FakeHashIndex()
+            code_index = FakeCodeIndex()
 
         query_embeddings = np.asarray(
             [[0.0, 0.0], [1.0, 0.0], [9.0, 9.0]], dtype=np.float32

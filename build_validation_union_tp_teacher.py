@@ -8,9 +8,9 @@ import os.path as osp
 import numpy as np
 
 from ann_index import load_hierarchy_arrays
-from hash_global import HashGlobalConfig, HashGlobalIndex, load_hash_head
-from hier_hash_large_scale import load_embedding_payload
-from topo_route_hash_large_scale import AdaptiveTopoHashIndex, TopoRouteHashConfig
+from binary_codes import BinaryCodeIndexConfig, BinaryCodeIndex, load_code_encoder
+from hierarchical_code_large_scale import load_embedding_payload
+from candidate_selection import AdaptiveCandidateSelectionIndex, CandidateSelectionConfig
 from trajectory_metric_backend import TrajectoryMetricBackend
 
 
@@ -23,8 +23,8 @@ def build_teacher(args):
     embeddings = payload["embeddings"]
     trajectories = payload["trajectories"]
     source_ids = payload["source_ids"]
-    head, _ = load_hash_head(args.candidate_hash_model_file)
-    hash_config = HashGlobalConfig(
+    head, _ = load_code_encoder(args.base_code_model_file)
+    code_config = BinaryCodeIndexConfig(
         bits=head.config.bits,
         probe_radius=args.probe_radius,
         hamming_candidates=args.hamming_candidates,
@@ -33,10 +33,10 @@ def build_teacher(args):
         embedding_storage="float16",
         encode_batch_size=args.encode_batch_size,
     )
-    hash_index = HashGlobalIndex(hash_config).build(
-        embeddings, head, encode_device=args.hash_device
+    code_index = BinaryCodeIndex(code_config).build(
+        embeddings, head, encode_device=args.code_device
     )
-    topo_config = TopoRouteHashConfig(
+    topo_config = CandidateSelectionConfig(
         candidate_source="hybrid",
         qgram=args.qgram,
         minhash_size=args.minhash_size,
@@ -55,8 +55,8 @@ def build_teacher(args):
         adaptive_max_rerank=args.max_rerank_candidates,
         seed=args.seed,
     )
-    index = AdaptiveTopoHashIndex(
-        hash_index, load_hierarchy_arrays(args.hierarchy_dir), topo_config
+    index = AdaptiveCandidateSelectionIndex(
+        code_index, load_hierarchy_arrays(args.hierarchy_dir), topo_config
     ).build(trajectories, scale_embeddings=payload.get("scale_embeddings"))
     backend = TrajectoryMetricBackend(
         "TP",
@@ -80,7 +80,7 @@ def build_teacher(args):
             ).astype(np.int64, copy=False)
             pools = index.retrieve_candidate_sets(
                 trajectories[int(query_id)],
-                hash_index.codes[int(query_id)],
+                code_index.codes[int(query_id)],
                 top_k=50,
                 exclude_ids=exclude_ids,
                 global_candidates=args.global_candidates,
@@ -122,8 +122,8 @@ def build_teacher(args):
         tp_distances=distances,
         embedding_count=np.asarray(len(embeddings), dtype=np.int64),
         source_embedding_file=np.asarray(osp.abspath(args.embedding_file)),
-        candidate_hash_model_file=np.asarray(
-            osp.abspath(args.candidate_hash_model_file)
+        base_code_model_file=np.asarray(
+            osp.abspath(args.base_code_model_file)
         ),
         candidate_config=np.asarray(json.dumps(config, sort_keys=True)),
     )
@@ -138,11 +138,11 @@ def build_teacher(args):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--embedding-file", required=True)
-    parser.add_argument("--candidate-hash-model-file", required=True)
+    parser.add_argument("--base-code-model-file", required=True)
     parser.add_argument("--hierarchy-dir", required=True)
     parser.add_argument("--point-distance-file", required=True)
     parser.add_argument("--output-file", required=True)
-    parser.add_argument("--hash-device", default="cpu")
+    parser.add_argument("--code-device", default="cpu")
     parser.add_argument("--num-threads", type=int, default=32)
     parser.add_argument("--probe-radius", type=int, default=1)
     parser.add_argument("--hamming-candidates", type=int, default=768)

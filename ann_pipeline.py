@@ -756,7 +756,7 @@ def parse_args():
         help=(
             "Omit coordinates and HMT scale outputs from the encoded file. This is "
             "recommended for 500k/1M Gallery generation and keeps all arrays needed "
-            "by hier_hash_large_scale.py and build_initial_only_gallery.py."
+            "by hierarchical_code_large_scale.py and build_initial_only_gallery.py."
         ),
     )
     perturb_build.add_argument("--min-length", type=int, default=4)

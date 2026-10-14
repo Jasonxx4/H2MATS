@@ -9,7 +9,7 @@ from time import perf_counter
 import numpy as np
 
 
-METHODS = ("hier-hash", "global-hash", "exact")
+METHODS = ("hier-code", "code-scan", "exact")
 
 
 def _topk_indices(distances, k):
@@ -543,9 +543,9 @@ def _candidate_overlap_summary(struct_candidates, global_candidates):
 
 
 def _fusion_config(args):
-    from hier_hash_fusion import HierHashFusionConfig
+    from hierarchical_code_fusion import HierarchicalCodeFusionConfig
 
-    return HierHashFusionConfig(
+    return HierarchicalCodeFusionConfig(
         routing_mode=args.routing_mode,
         pattern_level=args.pattern_level,
         path_max_len=args.path_max_len,
@@ -558,23 +558,23 @@ def _fusion_config(args):
         max_route_candidates=args.max_route_candidates,
         bucket_max_size=args.bucket_max_size,
         struct_hamming_candidates=args.struct_hamming_candidates,
-        global_hash_candidates=args.global_hash_candidates,
+        code_scan_candidates=args.code_scan_candidates,
         max_rerank_candidates=args.max_rerank_candidates,
     )
 
 
 def _build_indexes(args, gallery, scale_dir, selected_rows):
-    from hash_global import HashGlobalConfig, HashGlobalIndex, load_hash_head
-    from hier_hash_fusion import HierHashFusionIndex
+    from binary_codes import BinaryCodeIndexConfig, BinaryCodeIndex, load_code_encoder
+    from hierarchical_code_fusion import HierarchicalCodeFusionIndex
 
     embeddings = gallery["embeddings"][selected_rows]
     trajectories = gallery["trajectories"][selected_rows]
     source_ids = gallery["source_ids"][selected_rows]
-    hash_index_dir = osp.join(scale_dir, "hash_index")
+    code_index_dir = osp.join(scale_dir, "code_index")
     fusion_index_dir = osp.join(scale_dir, "fusion_index")
 
-    head, head_metadata = load_hash_head(args.hash_model_file)
-    hash_config = HashGlobalConfig(
+    head, head_metadata = load_code_encoder(args.code_model_file)
+    code_config = BinaryCodeIndexConfig(
         bits=head.config.bits,
         subcode_bits=16,
         probe_radius=args.probe_radius,
@@ -584,22 +584,22 @@ def _build_indexes(args, gallery, scale_dir, selected_rows):
         embedding_storage=args.embedding_storage,
         encode_batch_size=args.encode_batch_size,
     )
-    hash_start = perf_counter()
-    hash_index = HashGlobalIndex(hash_config).build(
+    code_index_start = perf_counter()
+    code_index = BinaryCodeIndex(code_config).build(
         embeddings,
         head,
-        encode_device=args.hash_device,
+        encode_device=args.code_device,
         metadata={
             "source_embedding_file": gallery["path"],
             "selected_gallery_size": int(len(selected_rows)),
-            "hash_training": head_metadata,
+            "code_training": head_metadata,
         },
     )
-    hash_seconds = perf_counter() - hash_start
-    hash_index.save(hash_index_dir)
+    code_seconds = perf_counter() - code_index_start
+    code_index.save(code_index_dir)
 
     fusion_start = perf_counter()
-    fusion_index = HierHashFusionIndex(hash_index, _fusion_config(args)).build(
+    fusion_index = HierarchicalCodeFusionIndex(code_index, _fusion_config(args)).build(
         trajectories,
         args.hierarchy_dir,
         metadata_info={
@@ -608,16 +608,16 @@ def _build_indexes(args, gallery, scale_dir, selected_rows):
         },
     )
     fusion_seconds = perf_counter() - fusion_start
-    fusion_index.save(fusion_index_dir, hash_index_dir)
+    fusion_index.save(fusion_index_dir, code_index_dir)
     np.save(osp.join(scale_dir, "selected_gallery_rows.npy"), selected_rows)
     np.save(osp.join(scale_dir, "selected_gallery_source_ids.npy"), source_ids)
     return fusion_index, {
-        "hash_index_dir": hash_index_dir,
+        "code_index_dir": code_index_dir,
         "fusion_index_dir": fusion_index_dir,
-        "hash_seconds": float(hash_seconds),
+        "code_seconds": float(code_seconds),
         "fusion_seconds": float(fusion_seconds),
-        "total_seconds": float(hash_seconds + fusion_seconds),
-        "hash_disk_mb": float(_directory_size(hash_index_dir) / (1024 ** 2)),
+        "total_seconds": float(code_seconds + fusion_seconds),
+        "code_disk_mb": float(_directory_size(code_index_dir) / (1024 ** 2)),
         "fusion_disk_mb": float(_directory_size(fusion_index_dir) / (1024 ** 2)),
     }
 
@@ -644,7 +644,7 @@ def _evaluate_method(
     candidate_lists = {
         "struct": [],
         "struct_unique": [],
-        "global_hash": [],
+        "code_scan": [],
         "union_before_cap": [],
         "union_rerank": [],
     }
@@ -671,7 +671,7 @@ def _evaluate_method(
     exact_gallery = None
     if method == "exact":
         exact_gallery = np.asarray(gallery_embeddings, dtype=np.float32)
-        if index.hash_index.config.normalize or index.hash_index.config.metric == "cosine":
+        if index.code_index.config.normalize or index.code_index.config.metric == "cosine":
             norms = np.linalg.norm(exact_gallery, axis=1, keepdims=True)
             exact_gallery = exact_gallery / np.maximum(norms, 1e-12)
 
@@ -685,7 +685,7 @@ def _evaluate_method(
 
     for query_id in query_ids:
         start = perf_counter()
-        if method == "hier-hash":
+        if method == "hier-code":
             ids, _, details = index.query(
                 query_embeddings[query_id],
                 query_trajectories[query_id],
@@ -698,7 +698,7 @@ def _evaluate_method(
             candidate_lists["struct_unique"].append(
                 details["struct_unique_candidate_ids"]
             )
-            candidate_lists["global_hash"].append(details["global_candidate_ids"])
+            candidate_lists["code_scan"].append(details["global_candidate_ids"])
             # Compare the two routes before fusion removes Global IDs from the
             # structural route and refills its protected novelty quota.
             struct_ids = np.unique(
@@ -745,15 +745,15 @@ def _evaluate_method(
             detail_counts["max_l3_hop"].append(details.get("max_l3_hop", 0))
             detail_counts["buckets"].append(details["bucket_count"])
             full_scan_count += int(details["global_used_full_scan"])
-        elif method == "global-hash":
-            ids, _, details = index.hash_index.query(
+        elif method == "code-scan":
+            ids, _, details = index.code_index.query(
                 query_embeddings[query_id],
                 top_k=top_k,
                 exclude_ids=None,
                 return_details=True,
                 query_code=query_codes[query_id],
             )
-            candidate_lists["global_hash"].append(details["candidate_ids"])
+            candidate_lists["code_scan"].append(details["candidate_ids"])
             detail_counts["global"].append(details["hamming_candidate_count"])
             detail_counts["rerank"].append(details["hamming_candidate_count"])
             full_scan_count += int(details["used_full_scan"])
@@ -761,11 +761,11 @@ def _evaluate_method(
             query_embedding = np.asarray(
                 query_embeddings[query_id], dtype=np.float32
             ).reshape(-1)
-            if index.hash_index.config.normalize or index.hash_index.config.metric == "cosine":
+            if index.code_index.config.normalize or index.code_index.config.metric == "cosine":
                 query_embedding = query_embedding / max(
                     float(np.linalg.norm(query_embedding)), 1e-12
                 )
-            if index.hash_index.config.metric == "cosine":
+            if index.code_index.config.metric == "cosine":
                 distances = 1.0 - exact_gallery @ query_embedding
             else:
                 difference = exact_gallery - query_embedding.reshape(1, -1)
@@ -797,9 +797,9 @@ def _evaluate_method(
         if lists
     }
     candidate_overlap = None
-    if method == "hier-hash":
+    if method == "hier-code":
         candidate_overlap = _candidate_overlap_summary(
-            candidate_lists["struct"], candidate_lists["global_hash"]
+            candidate_lists["struct"], candidate_lists["code_scan"]
         )
     candidate_counts = {
         **{
@@ -845,7 +845,7 @@ def _evaluate_method(
 
 
 def run_scale(args, gallery, queries, gallery_size):
-    from hash_global import encode_binary_codes
+    from binary_codes import encode_binary_codes
 
     scale_dir = osp.join(args.output_dir, f"gallery_{gallery_size}")
     os.makedirs(scale_dir, exist_ok=True)
@@ -935,9 +935,9 @@ def run_scale(args, gallery, queries, gallery_size):
     index, build_report = _build_indexes(args, gallery, scale_dir, selected_rows)
     code_start = perf_counter()
     query_codes = encode_binary_codes(
-        index.hash_index.head,
+        index.code_index.head,
         query_embeddings,
-        batch_size=index.hash_index.config.encode_batch_size,
+        batch_size=index.code_index.config.encode_batch_size,
         device=args.query_code_device,
     )
     code_encoding_ms = (perf_counter() - code_start) * 1000.0
@@ -1010,11 +1010,11 @@ def run_scale(args, gallery, queries, gallery_size):
             "p50": float(np.percentile(query_positive_counts, 50)),
             "max": int(query_positive_counts.max()),
         },
-        "hash": {
-            "bits": int(index.hash_index.config.bits),
-            "probe_radius": int(index.hash_index.config.probe_radius),
-            "hamming_candidates": int(index.hash_index.config.hamming_candidates),
-            "metric": index.hash_index.config.metric,
+        "codes": {
+            "bits": int(index.code_index.config.bits),
+            "probe_radius": int(index.code_index.config.probe_radius),
+            "hamming_candidates": int(index.code_index.config.hamming_candidates),
+            "metric": index.code_index.config.metric,
         },
         "fusion": vars(index.config),
         "build": build_report,
@@ -1052,7 +1052,7 @@ def run_scale(args, gallery, queries, gallery_size):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Build and evaluate hierarchy + global hash fusion over configurable "
+            "Build and evaluate hierarchy + code-scan fusion over configurable "
             "Gallery sizes using independent paired Query/Gallery files."
         )
     )
@@ -1066,7 +1066,7 @@ def parse_args():
         default="stored",
         help="Use query-row to remap legacy perturbation Gallery IDs through Query source_ids.",
     )
-    parser.add_argument("--hash-model-file", required=True)
+    parser.add_argument("--code-model-file", required=True)
     parser.add_argument("--hierarchy-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     size_group = parser.add_mutually_exclusive_group()
@@ -1106,7 +1106,7 @@ def parse_args():
     parser.add_argument(
         "--missing-positive-policy", choices=["error", "skip"], default="error"
     )
-    parser.add_argument("--methods", default="hier-hash")
+    parser.add_argument("--methods", default="hier-code")
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--max-queries", type=int, default=0)
     parser.add_argument("--exact-max-queries", type=int, default=200)
@@ -1119,7 +1119,7 @@ def parse_args():
         "--embedding-storage", choices=["float16", "float32"], default="float16"
     )
     parser.add_argument("--encode-batch-size", type=int, default=4096)
-    parser.add_argument("--hash-device", default="auto")
+    parser.add_argument("--code-device", default="auto")
     parser.add_argument("--query-code-device", default="cpu")
 
     parser.add_argument(
@@ -1136,7 +1136,7 @@ def parse_args():
     parser.add_argument("--max-route-candidates", type=int, default=4096)
     parser.add_argument("--bucket-max-size", type=int, default=512)
     parser.add_argument("--struct-hamming-candidates", type=int, default=512)
-    parser.add_argument("--global-hash-candidates", type=int, default=1024)
+    parser.add_argument("--code-scan-candidates", type=int, default=1024)
     parser.add_argument("--max-rerank-candidates", type=int, default=1536)
     return parser.parse_args()
 
@@ -1157,16 +1157,16 @@ def main():
         raise ValueError(
             f"--methods must contain a non-empty subset of {METHODS}; unknown={unknown}."
         )
-    if "hier-hash" in methods and args.top_k > min(
-        args.global_hash_candidates, args.max_rerank_candidates
+    if "hier-code" in methods and args.top_k > min(
+        args.code_scan_candidates, args.max_rerank_candidates
     ):
         raise ValueError(
-            "For hier-hash, --top-k cannot exceed --global-hash-candidates or "
+            "For hier-code, --top-k cannot exceed --code-scan-candidates or "
             "--max-rerank-candidates."
         )
-    if "global-hash" in methods and args.top_k > args.hamming_candidates:
+    if "code-scan" in methods and args.top_k > args.hamming_candidates:
         raise ValueError(
-            "For global-hash, --top-k cannot exceed --hamming-candidates."
+            "For code-scan, --top-k cannot exceed --hamming-candidates."
         )
     gallery = load_embedding_payload(
         args.gallery_file, args.gallery_source_ids, role="gallery"

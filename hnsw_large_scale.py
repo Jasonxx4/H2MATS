@@ -9,7 +9,7 @@ from time import perf_counter
 
 import numpy as np
 
-from hier_hash_large_scale import (
+from hierarchical_code_large_scale import (
     _json_dump,
     _topk_indices,
     gallery_composition,
@@ -19,7 +19,7 @@ from hier_hash_large_scale import (
     select_gallery_rows,
     source_retrieval_metrics,
 )
-from topo_route_hash_large_scale import _payload_labels, _row_retrieval_metrics, _same_file
+from candidate_selection import _payload_labels, _row_retrieval_metrics, _same_file
 from tp_retrieval_evaluation import (
     add_tp_arguments,
     close_mmap_array,

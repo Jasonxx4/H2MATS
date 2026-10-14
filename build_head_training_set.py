@@ -1,4 +1,4 @@
-"""Build a row-aligned train+validation set for post-hoc hash heads.
+"""Build a row-aligned train+validation set for post-hoc code encoders.
 
 The nominal Porto/Beijing split has up to 15k encoder-training rows and 5k
 validation rows. Preprocessing can remove invalid trajectories, so the actual

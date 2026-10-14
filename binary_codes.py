@@ -20,7 +20,7 @@ def _load_hnswlib():
         import hnswlib
     except ImportError as exc:
         raise ImportError(
-            "The hnsw hash backend requires hnswlib. "
+            "The hnsw code backend requires hnswlib. "
             "Install it with 'pip install hnswlib'."
         ) from exc
     return hnswlib
@@ -35,7 +35,7 @@ def _binary_vectors(codes):
 
 
 @dataclass
-class HashHeadConfig:
+class CodeEncoderConfig:
     input_dim: int
     bits: int = 128
     hidden_dim: int = 256
@@ -52,8 +52,8 @@ class HashHeadConfig:
             raise ValueError("dropout must be in [0, 1).")
 
 
-class BinaryHashHead(nn.Module):
-    """Post-hoc MLP that maps a continuous trajectory embedding to hash bits."""
+class BinaryCodeEncoder(nn.Module):
+    """Post-hoc MLP that maps a continuous trajectory embedding to binary code bits."""
 
     def __init__(self, config):
         super().__init__()
@@ -89,7 +89,7 @@ class BinaryHashHead(nn.Module):
 
 
 @dataclass
-class HashTrainConfig:
+class CodeTrainConfig:
     metric: str = "l2"
     epochs: int = 30
     batch_size: int = 512
@@ -395,7 +395,7 @@ def _soft_hamming(left, right):
     return ((bits - torch.sum(left * right, dim=-1)) / (2.0 * bits)).clamp(0.0, 1.0)
 
 
-def semantic_hash_loss(
+def semantic_code_loss(
     anchor,
     positive,
     negative,
@@ -421,8 +421,8 @@ def semantic_hash_loss(
         teacher_negative = teacher_negative.unsqueeze(1)
         if metric_negative_distance is not None:
             metric_negative_distance = metric_negative_distance.unsqueeze(1)
-    positive_hash_distance = _soft_hamming(anchor.unsqueeze(1), positive)
-    negative_hash_distance = _soft_hamming(anchor.unsqueeze(1), negative)
+    positive_code_distance = _soft_hamming(anchor.unsqueeze(1), positive)
+    negative_code_distance = _soft_hamming(anchor.unsqueeze(1), negative)
     positive_target = _teacher_distance(
         teacher_anchor.unsqueeze(1), teacher_positive, train_config.metric, l2_scale
     )
@@ -430,9 +430,9 @@ def semantic_hash_loss(
         teacher_anchor.unsqueeze(1), teacher_negative, train_config.metric, l2_scale
     )
 
-    embedding_semantic = F.mse_loss(positive_hash_distance, positive_target)
+    embedding_semantic = F.mse_loss(positive_code_distance, positive_target)
     embedding_semantic = embedding_semantic + F.mse_loss(
-        negative_hash_distance, negative_target
+        negative_code_distance, negative_target
     )
     semantic = train_config.embedding_distance_weight * embedding_semantic
     metric_semantic = semantic.new_zeros(())
@@ -452,18 +452,18 @@ def semantic_hash_loss(
         negative_mask = torch.isfinite(metric_negative_distance)
         if positive_mask.any():
             metric_semantic = metric_semantic + F.smooth_l1_loss(
-                positive_hash_distance[positive_mask],
+                positive_code_distance[positive_mask],
                 positive_metric_target[positive_mask],
             )
         if negative_mask.any():
             metric_semantic = metric_semantic + F.smooth_l1_loss(
-                negative_hash_distance[negative_mask],
+                negative_code_distance[negative_mask],
                 negative_metric_target[negative_mask],
             )
         semantic = semantic + train_config.metric_distance_weight * metric_semantic
 
-    hardest_positive = positive_hash_distance.max(dim=1).values
-    hardest_negative = negative_hash_distance.min(dim=1).values
+    hardest_positive = positive_code_distance.max(dim=1).values
+    hardest_negative = negative_code_distance.min(dim=1).values
     ranking = F.relu(
         train_config.margin + hardest_positive - hardest_negative
     ).mean()
@@ -536,7 +536,7 @@ def semantic_hash_loss(
     }
 
 
-def train_hash_head(
+def train_code_encoder(
     embeddings,
     labels,
     head_config,
@@ -545,14 +545,14 @@ def train_hash_head(
     source_ids=None,
     anchor_count=None,
 ):
-    """Train a hash head while keeping the upstream trajectory encoder frozen."""
-    train_config = train_config or HashTrainConfig()
+    """Train a code encoder while keeping the upstream trajectory encoder frozen."""
+    train_config = train_config or CodeTrainConfig()
     train_config.validate()
     embeddings = _as_float32_matrix(embeddings)
     anchor_count = len(embeddings) if anchor_count is None else int(anchor_count)
     if embeddings.shape[1] != head_config.input_dim:
         raise ValueError(
-            f"Hash head input_dim={head_config.input_dim} does not match embeddings "
+            f"Code encoder input_dim={head_config.input_dim} does not match embeddings "
             f"with dimension {embeddings.shape[1]}."
         )
     if metric_distances is not None:
@@ -703,7 +703,7 @@ def train_hash_head(
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(train_config.seed)
     device = _resolve_device(train_config.device)
-    head = BinaryHashHead(head_config)
+    head = BinaryCodeEncoder(head_config)
     head.fit_input_normalization(embeddings)
     head.to(device)
     optimizer = torch.optim.AdamW(
@@ -797,7 +797,7 @@ def train_hash_head(
         negative_metric_distances = torch.as_tensor(
             negative_metric_distances, dtype=torch.float32, device=device
         )
-        loss, parts = semantic_hash_loss(
+        loss, parts = semantic_code_loss(
             soft_anchor,
             soft_positive,
             soft_negative,
@@ -971,7 +971,7 @@ def train_hash_head(
     return head, report
 
 
-def save_hash_head(head, path, metadata=None):
+def save_code_encoder(head, path, metadata=None):
     out_dir = osp.dirname(path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -984,14 +984,14 @@ def save_hash_head(head, path, metadata=None):
     torch.save(checkpoint, path)
 
 
-def load_hash_head(path, map_location="cpu"):
+def load_code_encoder(path, map_location="cpu"):
     try:
         checkpoint = torch.load(path, map_location=map_location, weights_only=True)
     except TypeError:
         checkpoint = torch.load(path, map_location=map_location)
     if not isinstance(checkpoint, dict) or "config" not in checkpoint or "state_dict" not in checkpoint:
-        raise ValueError(f"Invalid hash-head checkpoint: {path}")
-    head = BinaryHashHead(HashHeadConfig(**checkpoint["config"]))
+        raise ValueError(f"Invalid code-encoder checkpoint: {path}")
+    head = BinaryCodeEncoder(CodeEncoderConfig(**checkpoint["config"]))
     head.load_state_dict(checkpoint["state_dict"])
     head.to(map_location).eval()
     return head, checkpoint.get("metadata", {})
@@ -1021,7 +1021,7 @@ def encode_binary_codes(head, embeddings, batch_size=4096, device="auto"):
     embeddings = _as_float32_matrix(embeddings)
     if embeddings.shape[1] != head.config.input_dim:
         raise ValueError(
-            f"Embedding dimension {embeddings.shape[1]} does not match hash head "
+            f"Embedding dimension {embeddings.shape[1]} does not match code encoder "
             f"input dimension {head.config.input_dim}."
         )
     device = _resolve_device(device)
@@ -1039,11 +1039,11 @@ def encode_binary_codes(head, embeddings, batch_size=4096, device="auto"):
 
 
 def encode_soft_codes(head, embeddings, batch_size=4096, device="auto", temperature=1.0):
-    """Encode continuous tanh hash codes for a score-only prefilter."""
+    """Encode continuous tanh codes for a score-only prefilter."""
     embeddings = _as_float32_matrix(embeddings)
     if embeddings.shape[1] != head.config.input_dim:
         raise ValueError(
-            f"Embedding dimension {embeddings.shape[1]} does not match hash head "
+            f"Embedding dimension {embeddings.shape[1]} does not match code encoder "
             f"input dimension {head.config.input_dim}."
         )
     if float(temperature) <= 0.0:
@@ -1062,7 +1062,7 @@ def encode_soft_codes(head, embeddings, batch_size=4096, device="auto", temperat
 
 
 @dataclass
-class HashGlobalConfig:
+class BinaryCodeIndexConfig:
     bits: int = 128
     subcode_bits: int = 16
     probe_radius: int = 1
@@ -1145,11 +1145,11 @@ def _topk_indices(distances, k):
     return order[np.argsort(distances[order], kind="stable")]
 
 
-class HashGlobalIndex:
-    """Hash candidate retrieval (MIH, HNSW, or exact binary scan) plus reranking."""
+class BinaryCodeIndex:
+    """Binary-code candidate retrieval (MIH, HNSW, or exact binary scan) plus reranking."""
 
     def __init__(self, config=None):
-        self.config = config or HashGlobalConfig()
+        self.config = config or BinaryCodeIndexConfig()
         self.config.validate()
         self.head = None
         self.embeddings = None
@@ -1165,11 +1165,11 @@ class HashGlobalIndex:
         embeddings = _as_float32_matrix(embeddings)
         if head.config.bits != self.config.bits:
             raise ValueError(
-                f"Hash head produces {head.config.bits} bits, index expects {self.config.bits}."
+                f"Code encoder produces {head.config.bits} bits, index expects {self.config.bits}."
             )
         if embeddings.shape[1] != head.config.input_dim:
             raise ValueError(
-                f"Embedding dimension {embeddings.shape[1]} does not match hash head "
+                f"Embedding dimension {embeddings.shape[1]} does not match code encoder "
                 f"input dimension {head.config.input_dim}."
             )
         raw_embeddings = embeddings
@@ -1212,7 +1212,7 @@ class HashGlobalIndex:
 
     def _build_hnsw(self):
         if len(self.codes) == 0:
-            raise ValueError("Cannot build an HNSW hash index with no vectors.")
+            raise ValueError("Cannot build an HNSW code index with no vectors.")
         hnswlib = _load_hnswlib()
         index = hnswlib.Index(space="l2", dim=int(self.config.bits))
         index.init_index(
@@ -1288,7 +1288,7 @@ class HashGlobalIndex:
                        exclude_ids=None):
         """Retrieve candidates with the selected backend, ranked by Hamming distance."""
         if self.codes is None:
-            raise RuntimeError("The hash index has not been built or loaded.")
+            raise RuntimeError("The code index has not been built or loaded.")
         query_code = np.asarray(query_code, dtype=np.uint8).reshape(-1)
         if len(query_code) != self.config.bits // 8:
             raise ValueError(
@@ -1310,7 +1310,7 @@ class HashGlobalIndex:
             return self._flat_hamming_search(query_code, candidate_limit, exclude_ids)
         if self.config.backend == "hnsw":
             if self.hnsw_index is None:
-                raise RuntimeError("The HNSW hash index has not been built or loaded.")
+                raise RuntimeError("The HNSW code index has not been built or loaded.")
             valid_excluded = exclude_ids[
                 (exclude_ids >= 0) & (exclude_ids < len(self.codes))
             ]
@@ -1368,10 +1368,10 @@ class HashGlobalIndex:
 
             if labels is None:
                 raise RuntimeError(
-                    "HNSW could not return the minimum required hash candidate "
+                    "HNSW could not return the minimum required code candidate "
                     f"pool (required={required}, requested={request}). Rebuild "
-                    "the index with larger --hash-hnsw-m and "
-                    "--hash-hnsw-ef-construction."
+                    "the index with larger --code-hnsw-m and "
+                    "--code-hnsw-ef-construction."
                 ) from last_error
             candidates = labels[0].astype(np.int64, copy=False)
             # Recompute exact packed Hamming distances for the small returned
@@ -1424,10 +1424,10 @@ class HashGlobalIndex:
                 candidates = candidates[~np.isin(candidates, exclude_ids)]
             used_full_scan = True
 
-        hash_distance = hamming_distances(query_code, self.codes[candidates])
-        order = _topk_indices(hash_distance, min(candidate_limit, len(candidates)))
+        code_distance = hamming_distances(query_code, self.codes[candidates])
+        order = _topk_indices(code_distance, min(candidate_limit, len(candidates)))
         selected_ids = candidates[order].astype(np.int64, copy=False)
-        selected_distances = hash_distance[order].astype(np.int32, copy=False)
+        selected_distances = code_distance[order].astype(np.int32, copy=False)
         return selected_ids, selected_distances, {
             "mih_candidate_count": mih_candidate_count,
             "hamming_candidate_count": int(len(selected_ids)),
@@ -1437,7 +1437,7 @@ class HashGlobalIndex:
     def rerank_continuous(self, query_embedding, candidate_ids, top_k):
         """Rerank an explicit candidate set with the index's continuous metric."""
         if self.embeddings is None:
-            raise RuntimeError("The hash index has not been built or loaded.")
+            raise RuntimeError("The code index has not been built or loaded.")
         query_embedding = np.asarray(query_embedding, dtype=np.float32).reshape(-1)
         if query_embedding.shape[0] != self.embeddings.shape[1]:
             raise ValueError(
@@ -1446,7 +1446,7 @@ class HashGlobalIndex:
             )
         candidate_ids = np.asarray(candidate_ids, dtype=np.int64).reshape(-1)
         if np.any((candidate_ids < 0) | (candidate_ids >= len(self.embeddings))):
-            raise ValueError("candidate_ids contains an ID outside the hash index.")
+            raise ValueError("candidate_ids contains an ID outside the code index.")
         if self.config.normalize or self.config.metric == "cosine":
             query_embedding = query_embedding / max(float(np.linalg.norm(query_embedding)), 1e-12)
         gallery = self.embeddings[candidate_ids].astype(np.float32)
@@ -1464,10 +1464,10 @@ class HashGlobalIndex:
     def query(self, query_embedding, top_k=50, exclude_ids=None, return_details=False,
               query_code=None, rerank_mode="full", small_rerank_candidates=None):
         if self.embeddings is None or self.codes is None:
-            raise RuntimeError("The hash index has not been built or loaded.")
+            raise RuntimeError("The code index has not been built or loaded.")
         if top_k <= 0:
             raise ValueError("top_k must be positive.")
-        if rerank_mode not in {"full", "hash-only", "small-rerank"}:
+        if rerank_mode not in {"full", "code-only", "small-rerank"}:
             raise ValueError(f"Unsupported rerank_mode: {rerank_mode}")
         query_embedding = np.asarray(query_embedding, dtype=np.float32).reshape(-1)
         if query_code is None:
@@ -1480,7 +1480,7 @@ class HashGlobalIndex:
                     f"{self.config.bits // 8}."
                 )
         candidate_limit = self.config.hamming_candidates
-        if rerank_mode == "hash-only":
+        if rerank_mode == "code-only":
             candidate_limit = top_k
         elif rerank_mode == "small-rerank":
             if small_rerank_candidates is None:
@@ -1492,7 +1492,7 @@ class HashGlobalIndex:
             minimum_candidates=top_k,
             exclude_ids=exclude_ids,
         )
-        if rerank_mode == "hash-only":
+        if rerank_mode == "code-only":
             ids = rerank_ids[:top_k].astype(np.int64, copy=False)
             distances = hamming_distances_out[:top_k].astype(np.float32, copy=False)
         else:
@@ -1508,16 +1508,16 @@ class HashGlobalIndex:
 
     def save(self, index_dir):
         if self.embeddings is None or self.codes is None or self.head is None:
-            raise RuntimeError("Cannot save an unbuilt hash index.")
+            raise RuntimeError("Cannot save an unbuilt code index.")
         os.makedirs(index_dir, exist_ok=True)
         np.save(osp.join(index_dir, "embeddings.npy"), self.embeddings)
         np.save(osp.join(index_dir, "codes.npy"), self.codes)
         if self.config.backend == "hnsw":
-            self.hnsw_index.save_index(osp.join(index_dir, "hash_hnsw.bin"))
+            self.hnsw_index.save_index(osp.join(index_dir, "code_hnsw.bin"))
         elif self.config.backend == "mih":
             np.save(osp.join(index_dir, "table_offsets.npy"), self.table_offsets)
             np.save(osp.join(index_dir, "table_postings.npy"), self.table_postings)
-        save_hash_head(self.head, osp.join(index_dir, "hash_head.pt"), metadata=self.metadata)
+        save_code_encoder(self.head, osp.join(index_dir, "code_encoder.pt"), metadata=self.metadata)
         payload = {
             "format_version": 1,
             "config": asdict(self.config),
@@ -1526,28 +1526,28 @@ class HashGlobalIndex:
             "build_seconds": float(self.build_seconds),
             "metadata": self.metadata,
         }
-        with open(osp.join(index_dir, "hash_config.json"), "w", encoding="utf-8") as file:
+        with open(osp.join(index_dir, "code_config.json"), "w", encoding="utf-8") as file:
             json.dump(payload, file, indent=2)
 
     @classmethod
     def load(cls, index_dir, mmap=True):
-        with open(osp.join(index_dir, "hash_config.json"), "r", encoding="utf-8") as file:
+        with open(osp.join(index_dir, "code_config.json"), "r", encoding="utf-8") as file:
             payload = json.load(file)
-        index = cls(HashGlobalConfig(**payload["config"]))
+        index = cls(BinaryCodeIndexConfig(**payload["config"]))
         mmap_mode = "r" if mmap else None
         index.embeddings = np.load(osp.join(index_dir, "embeddings.npy"), mmap_mode=mmap_mode)
         index.codes = np.load(osp.join(index_dir, "codes.npy"), mmap_mode=mmap_mode)
         if index.config.backend == "hnsw":
             hnswlib = _load_hnswlib()
             index.hnsw_index = hnswlib.Index(space="l2", dim=int(index.config.bits))
-            index.hnsw_index.load_index(osp.join(index_dir, "hash_hnsw.bin"), max_elements=len(index.codes))
+            index.hnsw_index.load_index(osp.join(index_dir, "code_hnsw.bin"), max_elements=len(index.codes))
             index.hnsw_index.set_ef(max(int(index.config.hnsw_ef_search), int(index.config.hamming_candidates)))
         elif index.config.backend == "mih":
             index.table_offsets = np.load(osp.join(index_dir, "table_offsets.npy"), mmap_mode=mmap_mode)
             index.table_postings = np.load(osp.join(index_dir, "table_postings.npy"), mmap_mode=mmap_mode)
-        index.head, _ = load_hash_head(osp.join(index_dir, "hash_head.pt"))
+        index.head, _ = load_code_encoder(osp.join(index_dir, "code_encoder.pt"))
         index.metadata = payload.get("metadata", {})
         index.build_seconds = float(payload.get("build_seconds", 0.0))
         if len(index.embeddings) != len(index.codes):
-            raise ValueError("Hash index embeddings and codes contain different vector counts.")
+            raise ValueError("Code index embeddings and codes contain different vector counts.")
         return index

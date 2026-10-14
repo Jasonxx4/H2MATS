@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Emb-HNSW baseline: HNSW search over exported continuous embeddings, without
-# hashing or exact reranking. The exact distances serve only as ground truth.
+# binary codes or exact reranking. The exact distances serve only as ground truth.
 # Usage: bash scripts/run_large_scale_emb_hnsw.sh [extra args]
 set -euo pipefail
 

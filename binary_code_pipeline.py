@@ -7,15 +7,15 @@ from time import perf_counter
 
 import numpy as np
 
-from hash_global import (
-    HashGlobalConfig,
-    HashGlobalIndex,
-    HashHeadConfig,
-    HashTrainConfig,
+from binary_codes import (
+    BinaryCodeIndexConfig,
+    BinaryCodeIndex,
+    CodeEncoderConfig,
+    CodeTrainConfig,
     encode_binary_codes,
-    load_hash_head,
-    save_hash_head,
-    train_hash_head,
+    load_code_encoder,
+    save_code_encoder,
+    train_code_encoder,
 )
 
 
@@ -162,13 +162,13 @@ def train_command(args):
     if args.metric_distance_file:
         payload["metric_distances"] = load_metric_distances(args.metric_distance_file)
     embeddings = payload["embeddings"]
-    head_config = HashHeadConfig(
+    head_config = CodeEncoderConfig(
         input_dim=embeddings.shape[1],
         bits=args.bits,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
     )
-    train_config = HashTrainConfig(
+    train_config = CodeTrainConfig(
         metric=args.metric,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -206,7 +206,7 @@ def train_command(args):
         cutoff_rank_window=args.cutoff_rank_window,
         cutoff_samples=args.cutoff_samples,
     )
-    head, report = train_hash_head(
+    head, report = train_code_encoder(
         embeddings,
         payload["labels"],
         head_config,
@@ -220,10 +220,10 @@ def train_command(args):
         report["metric_distance_key"] = payload["metric_distance_key"]
     elif args.metric_distance_file:
         report["metric_distance_file"] = str(Path(args.metric_distance_file).resolve())
-    save_hash_head(head, args.model_file, metadata=report)
+    save_code_encoder(head, args.model_file, metadata=report)
     report_file = args.report_file or args.model_file + ".json"
     _json_dump(report_file, report)
-    print(f"Hash head saved to: {args.model_file}")
+    print(f"Code encoder saved to: {args.model_file}")
     print(
         f"vectors={len(embeddings)}, bits={args.bits}, "
         f"best_validation_loss={report['best_validation_loss']:.6f}"
@@ -233,8 +233,8 @@ def train_command(args):
 
 def build_command(args):
     payload = _load_npz_payload(args.embedding_file)
-    head, head_metadata = load_hash_head(args.model_file)
-    config = HashGlobalConfig(
+    head, head_metadata = load_code_encoder(args.model_file)
+    config = BinaryCodeIndexConfig(
         bits=head.config.bits,
         subcode_bits=16,
         probe_radius=args.probe_radius,
@@ -246,17 +246,17 @@ def build_command(args):
     )
     metadata = {
         "source_embedding_file": str(Path(args.embedding_file).resolve()),
-        "source_hash_model": str(Path(args.model_file).resolve()),
-        "hash_training": head_metadata,
+        "source_code_model": str(Path(args.model_file).resolve()),
+        "code_training": head_metadata,
     }
-    index = HashGlobalIndex(config).build(
+    index = BinaryCodeIndex(config).build(
         payload["embeddings"],
         head,
         encode_device=args.device,
         metadata=metadata,
     )
     index.save(args.index_dir)
-    print(f"Hash-global index saved to: {args.index_dir}")
+    print(f"Code-scan index saved to: {args.index_dir}")
     print(
         f"vectors={len(index.embeddings)}, bits={config.bits}, "
         f"tables={config.bits // config.subcode_bits}, "
@@ -281,7 +281,7 @@ def eval_command(args):
         if args.small_rerank_candidates <= 0:
             raise ValueError("--small-rerank-candidates must be positive.")
     payload = _load_npz_payload(args.embedding_file, require_labels=True)
-    index = HashGlobalIndex.load(args.index_dir, mmap=not args.no_mmap)
+    index = BinaryCodeIndex.load(args.index_dir, mmap=not args.no_mmap)
     embeddings = payload["embeddings"]
     labels = payload["labels"]
     if embeddings.shape[1] != index.head.config.input_dim:
@@ -315,7 +315,7 @@ def eval_command(args):
     try:
         from tqdm import tqdm
 
-        query_ids = tqdm(query_ids, desc="hash-global queries")
+        query_ids = tqdm(query_ids, desc="code-scan queries")
     except ImportError:
         pass
     for query_id in query_ids:
@@ -348,7 +348,7 @@ def eval_command(args):
     names = ["HR@10", "HR@50", "R10@50", "R1@1", "R1@10", "R1@50"]
     retrieval_mean_ms = float(np.mean(latencies_ms)) if latencies_ms else 0.0
     result = {
-        "method": "hash-global",
+        "method": "code-scan",
         "queries": int(total),
         "top_k": int(args.top_k),
         "truth_k": int(args.truth_k),
@@ -409,11 +409,11 @@ def eval_command(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Independent GHashing-style global hashing for trajectory embeddings."
+        description="Binary code learning and code-scan retrieval for trajectory embeddings."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    train = subparsers.add_parser("train", help="Train a post-hoc binary hash MLP.")
+    train = subparsers.add_parser("train", help="Train a post-hoc binary code encoder.")
     train.add_argument("--embedding-file", required=True)
     train.add_argument("--model-file", required=True)
     train.add_argument("--report-file", default=None)
@@ -471,7 +471,7 @@ def parse_args():
     train.add_argument("--seed", type=int, default=2026)
     train.add_argument("--device", default="auto")
 
-    build = subparsers.add_parser("build", help="Build a global multi-index hash index.")
+    build = subparsers.add_parser("build", help="Build a multi-index code index.")
     build.add_argument("--embedding-file", required=True)
     build.add_argument("--model-file", required=True)
     build.add_argument("--index-dir", required=True)
@@ -483,7 +483,7 @@ def parse_args():
     build.add_argument("--encode-batch-size", type=int, default=4096)
     build.add_argument("--device", default="auto")
 
-    evaluate = subparsers.add_parser("eval", help="Evaluate an existing hash-global index.")
+    evaluate = subparsers.add_parser("eval", help="Evaluate an existing code-scan index.")
     evaluate.add_argument("--embedding-file", required=True)
     evaluate.add_argument("--index-dir", required=True)
     evaluate.add_argument("--top-k", type=int, default=50)
@@ -494,11 +494,11 @@ def parse_args():
     evaluate.add_argument("--query-code-device", default="cpu")
     evaluate.add_argument(
         "--rerank-mode",
-        choices=["full", "hash-only", "small-rerank"],
+        choices=["full", "code-only", "small-rerank"],
         default="full",
         help=(
             "Final ranking mode: full keeps the original continuous rerank, "
-            "hash-only returns Hamming-ranked results, small-rerank reranks only "
+            "code-only returns Hamming-ranked results, small-rerank reranks only "
             "a reduced Hamming candidate set."
         ),
     )

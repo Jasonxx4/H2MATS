@@ -7,22 +7,22 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from hash_global import (
-    BinaryHashHead,
-    HashGlobalConfig,
-    HashGlobalIndex,
-    HashHeadConfig,
-    HashTrainConfig,
+from binary_codes import (
+    BinaryCodeEncoder,
+    BinaryCodeIndexConfig,
+    BinaryCodeIndex,
+    CodeEncoderConfig,
+    CodeTrainConfig,
     _prepare_metric_lists,
     _sample_triplets,
     hamming_distances,
-    load_hash_head,
+    load_code_encoder,
     pack_binary_codes,
-    save_hash_head,
-    semantic_hash_loss,
-    train_hash_head,
+    save_code_encoder,
+    semantic_code_loss,
+    train_code_encoder,
 )
-from hash_global_pipeline import load_metric_candidate_teacher
+from binary_code_pipeline import load_metric_candidate_teacher
 
 
 class BinaryCodeTest(unittest.TestCase):
@@ -39,39 +39,39 @@ class BinaryCodeTest(unittest.TestCase):
         self.assertEqual(packed.shape, (3, 2))
         np.testing.assert_array_equal(hamming_distances(packed[0], packed), [0, 16, 8])
 
-    def test_hash_head_checkpoint_round_trip(self):
+    def test_code_encoder_checkpoint_round_trip(self):
         torch.manual_seed(7)
-        head = BinaryHashHead(HashHeadConfig(input_dim=4, bits=16, hidden_dim=8, dropout=0.0))
+        head = BinaryCodeEncoder(CodeEncoderConfig(input_dim=4, bits=16, hidden_dim=8, dropout=0.0))
         head.fit_input_normalization(np.arange(24, dtype=np.float32).reshape(6, 4))
         query = torch.arange(4, dtype=torch.float32).reshape(1, 4)
         expected = head(query).detach().numpy()
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "head.pt")
-            save_hash_head(head, path, metadata={"test": True})
-            loaded, metadata = load_hash_head(path)
+            save_code_encoder(head, path, metadata={"test": True})
+            loaded, metadata = load_code_encoder(path)
             np.testing.assert_allclose(loaded(query).detach().numpy(), expected)
             self.assertTrue(metadata["test"])
 
 
-class HashGlobalIndexTest(unittest.TestCase):
+class BinaryCodeIndexTest(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(11)
         self.embeddings = rng.normal(size=(40, 4)).astype(np.float32)
         torch.manual_seed(11)
-        self.head = BinaryHashHead(
-            HashHeadConfig(input_dim=4, bits=16, hidden_dim=8, dropout=0.0)
+        self.head = BinaryCodeEncoder(
+            CodeEncoderConfig(input_dim=4, bits=16, hidden_dim=8, dropout=0.0)
         )
         self.head.fit_input_normalization(self.embeddings)
 
     def test_query_and_save_load(self):
-        config = HashGlobalConfig(
+        config = BinaryCodeIndexConfig(
             bits=16,
             probe_radius=0,
             hamming_candidates=20,
             metric="l2",
             embedding_storage="float32",
         )
-        index = HashGlobalIndex(config).build(self.embeddings, self.head, encode_device="cpu")
+        index = BinaryCodeIndex(config).build(self.embeddings, self.head, encode_device="cpu")
         ids, distances, details = index.query(
             self.embeddings[7], top_k=3, return_details=True
         )
@@ -85,14 +85,14 @@ class HashGlobalIndexTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             index.save(directory)
-            loaded = HashGlobalIndex.load(directory, mmap=False)
+            loaded = BinaryCodeIndex.load(directory, mmap=False)
             loaded_ids, loaded_distances = loaded.query(self.embeddings[7], top_k=3)
             np.testing.assert_array_equal(loaded_ids, ids)
             np.testing.assert_allclose(loaded_distances, distances)
 
     def test_exclude_id(self):
-        index = HashGlobalIndex(
-            HashGlobalConfig(
+        index = BinaryCodeIndex(
+            BinaryCodeIndexConfig(
                 bits=16,
                 probe_radius=1,
                 hamming_candidates=20,
@@ -112,7 +112,7 @@ class HashGlobalIndexTest(unittest.TestCase):
                 np.unpackbits(codes, axis=1) != np.unpackbits(query), axis=1
             )
             for block_size in (1, 31, 65536):
-                index = HashGlobalIndex(HashGlobalConfig(
+                index = BinaryCodeIndex(BinaryCodeIndexConfig(
                     bits=bits, backend="flat", flat_block_size=block_size
                 ))
                 index.codes = codes
@@ -130,8 +130,8 @@ class HashGlobalIndexTest(unittest.TestCase):
                         self.assertEqual(details["flat_scan_count"], len(codes))
                         self.assertTrue(details["used_full_scan"])
 
-    def test_flat_hash_only_preserves_hamming_order_without_embedding_rerank(self):
-        index = HashGlobalIndex(HashGlobalConfig(
+    def test_flat_code_only_preserves_hamming_order_without_embedding_rerank(self):
+        index = BinaryCodeIndex(BinaryCodeIndexConfig(
             bits=16, backend="flat", flat_block_size=2, hamming_candidates=4,
         ))
         # Embedding order is the reverse of Hamming order. The closest binary
@@ -143,7 +143,7 @@ class HashGlobalIndexTest(unittest.TestCase):
         ):
             ids, distances, details = index.query(
                 np.asarray([0.0]), top_k=3, query_code=np.asarray([0, 0], dtype=np.uint8),
-                rerank_mode="hash-only", return_details=True,
+                rerank_mode="code-only", return_details=True,
             )
         np.testing.assert_array_equal(ids, [3, 2, 1])
         np.testing.assert_array_equal(distances, [0, 1, 2])
@@ -151,7 +151,7 @@ class HashGlobalIndexTest(unittest.TestCase):
         self.assertTrue(details["used_full_scan"])
 
     def test_flat_query_and_mmap_round_trip_without_mih_tables(self):
-        index = HashGlobalIndex(HashGlobalConfig(
+        index = BinaryCodeIndex(BinaryCodeIndexConfig(
             bits=16, backend="flat", flat_block_size=7,
             hamming_candidates=len(self.embeddings), embedding_storage="float32",
         )).build(self.embeddings, self.head, encode_device="cpu")
@@ -165,7 +165,7 @@ class HashGlobalIndexTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             index.save(directory)
             self.assertFalse(os.path.exists(os.path.join(directory, "table_offsets.npy")))
-            loaded = HashGlobalIndex.load(directory, mmap=True)
+            loaded = BinaryCodeIndex.load(directory, mmap=True)
             try:
                 self.assertEqual(loaded.config.backend, "flat")
                 loaded_ids, loaded_distances = loaded.query(self.embeddings[7], top_k=5)
@@ -177,10 +177,10 @@ class HashGlobalIndexTest(unittest.TestCase):
 
     @unittest.skipUnless(
         importlib.util.find_spec("hnswlib") is not None,
-        "hnswlib is required for the HNSW hash backend",
+        "hnswlib is required for the HNSW code backend",
     )
     def test_hnsw_backend_search_and_save_load(self):
-        config = HashGlobalConfig(
+        config = BinaryCodeIndexConfig(
             bits=16,
             backend="hnsw",
             hamming_candidates=20,
@@ -188,7 +188,7 @@ class HashGlobalIndexTest(unittest.TestCase):
             metric="l2",
             embedding_storage="float32",
         )
-        index = HashGlobalIndex(config).build(self.embeddings, self.head, encode_device="cpu")
+        index = BinaryCodeIndex(config).build(self.embeddings, self.head, encode_device="cpu")
         ids, distances, details = index.query(
             self.embeddings[7], top_k=3, return_details=True
         )
@@ -197,7 +197,7 @@ class HashGlobalIndexTest(unittest.TestCase):
         self.assertGreater(details["hnsw_candidate_count"], 0)
         with tempfile.TemporaryDirectory() as directory:
             index.save(directory)
-            loaded = HashGlobalIndex.load(directory, mmap=False)
+            loaded = BinaryCodeIndex.load(directory, mmap=False)
             loaded_ids, loaded_distances = loaded.query(self.embeddings[7], top_k=3)
             np.testing.assert_array_equal(loaded_ids, ids)
             np.testing.assert_array_equal(loaded_distances, distances)
@@ -218,8 +218,8 @@ class HashGlobalIndexTest(unittest.TestCase):
                     np.zeros((1, k), dtype=np.float32),
                 )
 
-        index = HashGlobalIndex(
-            HashGlobalConfig(
+        index = BinaryCodeIndex(
+            BinaryCodeIndexConfig(
                 bits=16,
                 backend="hnsw",
                 hamming_candidates=8,
@@ -237,9 +237,9 @@ class HashGlobalIndexTest(unittest.TestCase):
         self.assertEqual(details["hnsw_requested_count"], 8)
         self.assertEqual(len(distances), len(ids))
 
-class HashTrainingTest(unittest.TestCase):
+class CodeTrainingTest(unittest.TestCase):
     def test_cutoff_rank_loss_penalizes_reversed_boundary(self):
-        config = HashTrainConfig(
+        config = CodeTrainConfig(
             embedding_distance_weight=0.0,
             ranking_weight=0.0,
             quantization_weight=0.0,
@@ -260,12 +260,12 @@ class HashTrainingTest(unittest.TestCase):
             train_config=config,
             l2_scale=1.0,
         )
-        good, good_parts = semantic_hash_loss(
+        good, good_parts = semantic_code_loss(
             **common,
             cutoff_positive_codes=anchor.unsqueeze(1),
             cutoff_negative_codes=(-anchor).unsqueeze(1),
         )
-        bad, bad_parts = semantic_hash_loss(
+        bad, bad_parts = semantic_code_loss(
             **common,
             cutoff_positive_codes=(-anchor).unsqueeze(1),
             cutoff_negative_codes=anchor.unsqueeze(1),
@@ -297,11 +297,11 @@ class HashTrainingTest(unittest.TestCase):
             [[(idx + offset) % len(embeddings) for offset in (1, 2, 3)] for idx in range(len(embeddings))],
             dtype=np.int64,
         )
-        head, report = train_hash_head(
+        head, report = train_code_encoder(
             embeddings,
             labels,
-            HashHeadConfig(input_dim=6, bits=16, hidden_dim=12, dropout=0.0),
-            HashTrainConfig(
+            CodeEncoderConfig(input_dim=6, bits=16, hidden_dim=12, dropout=0.0),
+            CodeTrainConfig(
                 epochs=2,
                 batch_size=4,
                 validation_fraction=0.25,
@@ -367,11 +367,11 @@ class HashTrainingTest(unittest.TestCase):
             np.linspace(0.1, 0.6, labels.shape[1], dtype=np.float32),
             (len(labels), 1),
         )
-        _, report = train_hash_head(
+        _, report = train_code_encoder(
             embeddings,
             labels,
-            HashHeadConfig(input_dim=6, bits=16, hidden_dim=12, dropout=0.0),
-            HashTrainConfig(
+            CodeEncoderConfig(input_dim=6, bits=16, hidden_dim=12, dropout=0.0),
+            CodeTrainConfig(
                 epochs=2,
                 batch_size=5,
                 positive_pool=2,

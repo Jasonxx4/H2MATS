@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Hierarchy-aware adaptive candidate selection on the standard test set.
-# The first run exports the embeddings and trains the base and metric hash
-# heads into ${OUTPUT_DIR}/hash_assets; later runs reuse them unless
-# --retrain-hash is given.
+# The first run exports the embeddings and trains the base and metric encoding
+# networks into ${OUTPUT_DIR}/code_assets; later runs reuse them unless
+# --retrain-codes is given.
 # Usage: bash scripts/run_candidate_selection.sh <checkpoint> [output-dir] [extra args]
 set -euo pipefail
 
@@ -15,7 +15,7 @@ DISTANCE_TYPE="${H2MATS_DISTANCE_TYPE:-TP}"
 CHECKPOINT="${H2MATS_CHECKPOINT:-}"
 OUTPUT_DIR="${H2MATS_OUTPUT_DIR:-ann_artifacts/${DATASET}/${DISTANCE_TYPE}/candidate_selection}"
 POINT_DISTANCE_FILE="${H2MATS_POINT_DISTANCE_FILE:-ground_truth/${DATASET}/Point_dis_matrix.npy}"
-HASH_DEVICE="${H2MATS_HASH_CUDA:-cuda:0}"
+CODE_DEVICE="${H2MATS_CODE_CUDA:-cuda:0}"
 MODEL_CUDA="${H2MATS_MODEL_CUDA:-0}"
 TP_THREADS="${H2MATS_TP_THREADS:-64}"
 
@@ -26,13 +26,13 @@ if [[ -z "${CHECKPOINT}" ]]; then
   exit 1
 fi
 
-ASSETS_DIR="${H2MATS_ASSETS_DIR:-${OUTPUT_DIR}/hash_assets}"
+ASSETS_DIR="${H2MATS_ASSETS_DIR:-${OUTPUT_DIR}/code_assets}"
 REUSE_ARGS=()
-if [[ -f "${ASSETS_DIR}/hash_head_128_candidate.pt" ]]; then
-  REUSE_ARGS+=(--reuse-hash-assets-dir "${ASSETS_DIR}")
+if [[ -f "${ASSETS_DIR}/code_encoder_128_base.pt" ]]; then
+  REUSE_ARGS+=(--reuse-code-assets-dir "${ASSETS_DIR}")
 fi
 
-exec "${PYTHON_BIN}" run_adaptive_topo_hash_checkpoint.py \
+exec "${PYTHON_BIN}" run_candidate_selection.py \
   --checkpoint "${CHECKPOINT}" \
   --dataset "${DATASET}" \
   --distance-type "${DISTANCE_TYPE}" \
@@ -40,10 +40,10 @@ exec "${PYTHON_BIN}" run_adaptive_topo_hash_checkpoint.py \
   "${REUSE_ARGS[@]}" \
   --bits 128 \
   --cuda "${MODEL_CUDA}" \
-  --hash-device "${HASH_DEVICE}" \
-  --query-code-device "${HASH_DEVICE}" \
-  --dual-hash-heads \
-  --methods adaptive-dual-metric,adaptive-dual-metric-no-rerank,global-hash \
+  --code-device "${CODE_DEVICE}" \
+  --query-code-device "${CODE_DEVICE}" \
+  --dual-code-encoders \
+  --methods adaptive-dual-metric,adaptive-dual-metric-no-rerank,code-scan \
   --adaptive-initial-global 768 \
   --adaptive-max-global 768 \
   --adaptive-initial-structural 96 \
@@ -63,7 +63,7 @@ exec "${PYTHON_BIN}" run_adaptive_topo_hash_checkpoint.py \
   --adaptive-preserve-global-top50 \
   --rerank-metric "${DISTANCE_TYPE}" \
   --point-distance-file "${POINT_DISTANCE_FILE}" \
-  --metric-prefilter-hash-score soft \
+  --metric-prefilter-code-score soft \
   --metric-prefilter-soft-temperature 1.0 \
   --dual-metric-search-candidates 256 \
   --dual-metric-candidates 64 \
@@ -74,7 +74,7 @@ exec "${PYTHON_BIN}" run_adaptive_topo_hash_checkpoint.py \
   --dual-metric-head-protect 48 \
   --dual-metric-structural-protect 16 \
   --dual-metric-embedding-weight 0.96 \
-  --dual-metric-hash-weight 0.02 \
+  --dual-metric-code-weight 0.02 \
   --dual-metric-topology-weight 0.02 \
   --tp-num-threads "${TP_THREADS}" \
   "$@"

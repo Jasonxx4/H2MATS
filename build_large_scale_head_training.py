@@ -1,11 +1,11 @@
-"""Build large-scale query/Gallery supervision for post-hoc hash heads.
+"""Build large-scale query/Gallery supervision for post-hoc code encoders.
 
 The workflow has two stages:
 
 1. ``truth`` computes exact Top-K TP truth for a new Query set against an
    existing large Gallery, while storing only Top-K IDs and distances.
 2. ``assemble`` combines pre-exported Query and Gallery embeddings into the
-   row-aligned format consumed by ``hash_global_pipeline.py``.  Only Query
+   row-aligned format consumed by ``binary_code_pipeline.py``.  Only Query
    rows have labels and act as training anchors; Gallery rows are candidates
    and negative-sampling sources.
 """

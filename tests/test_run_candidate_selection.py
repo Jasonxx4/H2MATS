@@ -3,22 +3,22 @@ import unittest
 
 import numpy as np
 
-from run_adaptive_topo_hash_checkpoint import _write_low_confidence_comparison
-from topo_route_hash_large_scale import (
-    AdaptiveTopoHashIndex,
-    TopoRouteHashConfig,
+from run_candidate_selection import _write_low_confidence_comparison
+from candidate_selection import (
+    AdaptiveCandidateSelectionIndex,
+    CandidateSelectionConfig,
 )
 from trajectory_metric_backend import TrajectoryMetricBackend
 
 
-class _HashConfig:
+class _CodeConfig:
     normalize = False
     metric = "l2"
     hamming_candidates = 50
 
 
-class _FakeHash:
-    config = _HashConfig()
+class _FakeCode:
+    config = _CodeConfig()
     embeddings = np.asarray(
         [[0.0, 0.0], [0.1, 0.0], [0.2, 0.0], [3.0, 0.0]],
         dtype=np.float32,
@@ -44,15 +44,15 @@ class _FakeHash:
         return candidate_ids[order], distances[order]
 
 
-class _MetricHashConfig:
+class _MetricCodeConfig:
     bits = 4
     normalize = False
     metric = "l2"
     hamming_candidates = 50
 
 
-class _FakeMetricHash:
-    config = _MetricHashConfig()
+class _FakeMetricCode:
+    config = _MetricCodeConfig()
     codes = np.asarray(
         [[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0], [1, 1, 0, 0]],
         dtype=np.uint8,
@@ -84,7 +84,7 @@ def _index():
         "node_to_l3": np.asarray([0, 0, 0, 0, 1, 1, 1, 1]),
         "l3_edges": np.asarray([[0, 1]], dtype=np.int64),
     }
-    config = TopoRouteHashConfig(
+    config = CandidateSelectionConfig(
         minhash_size=4,
         postings_per_level=2,
         min_route_candidates=1,
@@ -100,10 +100,10 @@ def _index():
         adaptive_overlap_threshold=1.0,
         adaptive_min_route_recall=1,
     )
-    return AdaptiveTopoHashIndex(_FakeHash(), hierarchy, config).build(trajectories)
+    return AdaptiveCandidateSelectionIndex(_FakeCode(), hierarchy, config).build(trajectories)
 
 
-class AdaptiveTopoHashTest(unittest.TestCase):
+class AdaptiveCandidateSelectionTest(unittest.TestCase):
     def test_low_confidence_comparison_persists_tracks_and_subset_metrics(self):
         with tempfile.TemporaryDirectory() as output_dir:
             args = type("Args", (), {"top_k": 2, "output_dir": output_dir})()
@@ -115,7 +115,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
             ]
             labels = np.asarray([[0, 1], [1, 0], [2, 3]], dtype=np.int64)
             predictions = {
-                "global-hash": [
+                "code-scan": [
                     np.asarray([0, 1]),
                     np.asarray([1, 0]),
                     np.asarray([0, 1]),
@@ -133,7 +133,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
             }
             results = [
                 {
-                    "method": "global-hash",
+                    "method": "code-scan",
                     "latency_ms": {"mean": 1.0},
                 },
                 {
@@ -166,11 +166,11 @@ class AdaptiveTopoHashTest(unittest.TestCase):
                 0.0,
             )
             self.assertIn(
-                "dual-hash-no-rerank",
+                "dual-code-no-rerank",
                 report["subset_report"]["eligible"]["methods"],
             )
             self.assertIn(
-                "dual_hash_no_rerank_predictions",
+                "dual_code_no_rerank_predictions",
                 np.load(report["artifact"], allow_pickle=False).files,
             )
             with np.load(report["artifact"], allow_pickle=False) as saved:
@@ -186,7 +186,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
 
     def _dual_index(self):
         index = _index()
-        index.metric_hash_index = _FakeMetricHash()
+        index.metric_code_index = _FakeMetricCode()
         index.config.dual_metric_search_candidates = 2
         index.config.dual_metric_candidates = 2
         index.config.dual_metric_high_quality_tp_candidates = 2
@@ -219,7 +219,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
         self.assertTrue(details["adaptive_global_fast_path"])
         self.assertTrue(details["adaptive_dual_metric"])
         self.assertTrue(details["metric_rerank_skipped"])
-        self.assertEqual(index.metric_hash_index.hamming_calls, 0)
+        self.assertEqual(index.metric_code_index.hamming_calls, 0)
 
     def test_dual_metric_low_confidence_merges_metric_only_candidate(self):
         index = self._dual_index()
@@ -243,7 +243,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
             metric_backend=Metric(),
             force_metric_rerank=True,
         )
-        self.assertEqual(index.metric_hash_index.hamming_calls, 1)
+        self.assertEqual(index.metric_code_index.hamming_calls, 1)
         self.assertTrue(metric_calls)
         self.assertTrue(details["tp_rerank_applied"])
         self.assertTrue(details["adaptive_dual_metric"])
@@ -280,7 +280,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
         self.assertTrue(details["adaptive_dual_metric_no_rerank"])
         self.assertTrue(details["metric_rerank_skipped"])
         self.assertFalse(details["tp_rerank_applied"])
-        self.assertEqual(index.metric_hash_index.hamming_calls, 1)
+        self.assertEqual(index.metric_code_index.hamming_calls, 1)
 
     def test_dual_metric_protects_global_top50(self):
         index = self._dual_index()
@@ -349,7 +349,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
         self.assertGreaterEqual(details["global_core_count"], 1)
         self.assertLessEqual(details["union_candidate_count"], 4)
         self.assertEqual(len(ids), 1)
-        self.assertEqual(index.hash_index.hamming_calls, 1)
+        self.assertEqual(index.code_index.hamming_calls, 1)
 
     def test_global_gate_skips_topology_feature_construction(self):
         index = _index()
@@ -368,7 +368,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
         self.assertEqual(len(ids), 1)
         self.assertTrue(details["adaptive_global_fast_path"])
         self.assertEqual(details["structural_candidate_count"], 0)
-        self.assertEqual(index.hash_index.hamming_calls, 1)
+        self.assertEqual(index.code_index.hamming_calls, 1)
 
     def test_global_gate_skips_expensive_metric_by_default(self):
         index = _index()
@@ -518,13 +518,13 @@ class AdaptiveTopoHashTest(unittest.TestCase):
         )
 
     def test_global_top50_is_embedding_ranked_from_baseline_hamming_pool(self):
-        class HashConfig:
+        class CodeConfig:
             normalize = False
             metric = "l2"
             hamming_candidates = 60
 
-        class HashIndex:
-            config = HashConfig()
+        class CodeIndex:
+            config = CodeConfig()
             embeddings = np.arange(70, dtype=np.float32).reshape(-1, 1)
 
             def hamming_search(self, *args, candidate_limit=None, **kwargs):
@@ -540,7 +540,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
                 order = np.argsort(distances, kind="stable")[:top_k]
                 return candidate_ids[order], distances[order]
 
-        config = TopoRouteHashConfig(
+        config = CandidateSelectionConfig(
             adaptive_gate="global",
             adaptive_metric_fast_path="metric",
             adaptive_preserve_global_top50=True,
@@ -549,7 +549,7 @@ class AdaptiveTopoHashTest(unittest.TestCase):
             metric_prefilter_global_protect=32,
             metric_prefilter_structural_protect=16,
         )
-        index = AdaptiveTopoHashIndex(HashIndex(), {}, config)
+        index = AdaptiveCandidateSelectionIndex(CodeIndex(), {}, config)
         index.trajectories = np.asarray(
             [np.asarray([row], dtype=np.int64) for row in range(70)],
             dtype=object,

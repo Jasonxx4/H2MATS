@@ -7,7 +7,7 @@ from dual_metric_fusion import (
     fit_weight_payload,
     validate_weight_payload,
 )
-from test_adaptive_topo_hash import _index, _FakeMetricHash
+from test_run_candidate_selection import _index, _FakeMetricCode
 
 
 def _payload(weights):
@@ -33,7 +33,7 @@ class DualMetricFusionTest(unittest.TestCase):
 
     def test_index_uses_metric_bucket_and_variant_weights(self):
         index = _index()
-        index.metric_hash_index = _FakeMetricHash()
+        index.metric_code_index = _FakeMetricCode()
         index.config.dual_metric_search_candidates = 2
         index.config.dual_metric_candidates = 2
         index.config.dual_metric_high_quality_tp_candidates = 2
@@ -72,7 +72,7 @@ class DualMetricFusionTest(unittest.TestCase):
     def test_learning_moves_weight_toward_predictive_signal(self):
         samples = []
         for _ in range(12):
-            # The first column perfectly ranks the oracle Top-1; the hash
+            # The first column perfectly ranks the oracle Top-1; the code
             # column is reversed and topology carries no information.
             samples.append({
                 "rank_features": np.asarray(

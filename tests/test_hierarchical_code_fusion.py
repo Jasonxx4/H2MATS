@@ -5,11 +5,11 @@ import unittest
 import numpy as np
 import torch
 
-from hash_global import BinaryHashHead, HashGlobalConfig, HashGlobalIndex, HashHeadConfig
-from hier_hash_fusion import HierHashFusionConfig, HierHashFusionIndex
+from binary_codes import BinaryCodeEncoder, BinaryCodeIndexConfig, BinaryCodeIndex, CodeEncoderConfig
+from hierarchical_code_fusion import HierarchicalCodeFusionConfig, HierarchicalCodeFusionIndex
 
 
-class HierHashFusionIndexTest(unittest.TestCase):
+class HierarchicalCodeFusionIndexTest(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(23)
         self.embeddings = rng.normal(size=(24, 6)).astype(np.float32)
@@ -18,8 +18,8 @@ class HierHashFusionIndexTest(unittest.TestCase):
             start = idx % 9
             self.trajectories[idx] = np.asarray([start, start + 1, start + 2], dtype=np.int64)
         torch.manual_seed(23)
-        self.head = BinaryHashHead(
-            HashHeadConfig(input_dim=6, bits=16, hidden_dim=12, dropout=0.0)
+        self.head = BinaryCodeEncoder(
+            CodeEncoderConfig(input_dim=6, bits=16, hidden_dim=12, dropout=0.0)
         )
         self.head.fit_input_normalization(self.embeddings)
 
@@ -33,25 +33,25 @@ class HierHashFusionIndexTest(unittest.TestCase):
     def test_parallel_query_and_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             hierarchy_dir = os.path.join(directory, "hierarchy")
-            hash_dir = os.path.join(directory, "hash")
+            code_dir = os.path.join(directory, "codes")
             fusion_dir = os.path.join(directory, "fusion")
             os.makedirs(hierarchy_dir)
             self._write_hierarchy(hierarchy_dir)
 
-            hash_index = HashGlobalIndex(
-                HashGlobalConfig(
+            code_index = BinaryCodeIndex(
+                BinaryCodeIndexConfig(
                     bits=16,
                     probe_radius=1,
                     hamming_candidates=12,
                     embedding_storage="float32",
                 )
             ).build(self.embeddings, self.head, encode_device="cpu")
-            hash_index.save(hash_dir)
-            fusion = HierHashFusionIndex(
-                hash_index,
-                HierHashFusionConfig(
+            code_index.save(code_dir)
+            fusion = HierarchicalCodeFusionIndex(
+                code_index,
+                HierarchicalCodeFusionConfig(
                     struct_hamming_candidates=8,
-                    global_hash_candidates=8,
+                    code_scan_candidates=8,
                     max_rerank_candidates=16,
                 ),
             ).build(self.trajectories, hierarchy_dir)
@@ -64,7 +64,7 @@ class HierHashFusionIndexTest(unittest.TestCase):
                 self.trajectories[5],
                 top_k=5,
                 return_details=True,
-                query_code=hash_index.codes[5],
+                query_code=code_index.codes[5],
             )
             self.assertEqual(int(ids[0]), 5)
             self.assertAlmostEqual(float(distances[0]), 0.0, places=6)
@@ -72,8 +72,8 @@ class HierHashFusionIndexTest(unittest.TestCase):
             self.assertGreater(details["global_candidate_count"], 0)
             self.assertLessEqual(details["rerank_candidate_count"], 16)
 
-            fusion.save(fusion_dir, hash_dir)
-            loaded = HierHashFusionIndex.load(fusion_dir, mmap=False)
+            fusion.save(fusion_dir, code_dir)
+            loaded = HierarchicalCodeFusionIndex.load(fusion_dir, mmap=False)
             loaded_ids, loaded_distances = loaded.query(
                 self.embeddings[5], self.trajectories[5], top_k=5
             )
@@ -83,15 +83,15 @@ class HierHashFusionIndexTest(unittest.TestCase):
     def test_exclude_self(self):
         with tempfile.TemporaryDirectory() as hierarchy_dir:
             self._write_hierarchy(hierarchy_dir)
-            hash_index = HashGlobalIndex(
-                HashGlobalConfig(
+            code_index = BinaryCodeIndex(
+                BinaryCodeIndexConfig(
                     bits=16,
                     probe_radius=1,
                     hamming_candidates=12,
                     embedding_storage="float32",
                 )
             ).build(self.embeddings, self.head, encode_device="cpu")
-            fusion = HierHashFusionIndex(hash_index).build(self.trajectories, hierarchy_dir)
+            fusion = HierarchicalCodeFusionIndex(code_index).build(self.trajectories, hierarchy_dir)
             ids, _ = fusion.query(
                 self.embeddings[3], self.trajectories[3], top_k=5, exclude_ids={3}
             )
@@ -100,30 +100,30 @@ class HierHashFusionIndexTest(unittest.TestCase):
     def test_hierarchical_routing_uses_l2_postings(self):
         with tempfile.TemporaryDirectory() as directory:
             hierarchy_dir = os.path.join(directory, "hierarchy")
-            hash_dir = os.path.join(directory, "hash")
+            code_dir = os.path.join(directory, "codes")
             fusion_dir = os.path.join(directory, "fusion")
             os.makedirs(hierarchy_dir)
             self._write_hierarchy(hierarchy_dir)
 
-            hash_index = HashGlobalIndex(
-                HashGlobalConfig(
+            code_index = BinaryCodeIndex(
+                BinaryCodeIndexConfig(
                     bits=16,
                     probe_radius=1,
                     hamming_candidates=12,
                     embedding_storage="float32",
                 )
             ).build(self.embeddings, self.head, encode_device="cpu")
-            hash_index.save(hash_dir)
-            fusion = HierHashFusionIndex(
-                hash_index,
-                HierHashFusionConfig(
+            code_index.save(code_dir)
+            fusion = HierarchicalCodeFusionIndex(
+                code_index,
+                HierarchicalCodeFusionConfig(
                     routing_mode="hierarchical",
                     l2_top_regions=2,
                     min_route_candidates=8,
                     max_route_candidates=16,
                     bucket_max_size=4,
                     struct_hamming_candidates=8,
-                    global_hash_candidates=8,
+                    code_scan_candidates=8,
                     max_rerank_candidates=16,
                 ),
             ).build(self.trajectories, hierarchy_dir)
@@ -144,7 +144,7 @@ class HierHashFusionIndexTest(unittest.TestCase):
                 self.trajectories[5],
                 top_k=5,
                 return_details=True,
-                query_code=hash_index.codes[5],
+                query_code=code_index.codes[5],
             )
             self.assertFalse(
                 set(query_details["struct_unique_candidate_ids"])
@@ -152,8 +152,8 @@ class HierHashFusionIndexTest(unittest.TestCase):
             )
             self.assertLessEqual(query_details["struct_unique_candidate_count"], 8)
 
-            fusion.save(fusion_dir, hash_dir)
-            loaded = HierHashFusionIndex.load(fusion_dir, mmap=False)
+            fusion.save(fusion_dir, code_dir)
+            loaded = HierarchicalCodeFusionIndex.load(fusion_dir, mmap=False)
             self.assertEqual(loaded.config.routing_mode, "hierarchical")
             loaded_ids, loaded_details = loaded.route_candidate_ids(self.trajectories[5])
             np.testing.assert_array_equal(loaded_ids, route_ids)

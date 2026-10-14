@@ -11,11 +11,11 @@ from ann_index import (
     build_trajectory_metadata,
     load_hierarchy_arrays,
 )
-from hash_global import HashGlobalIndex, hamming_distances
+from binary_codes import BinaryCodeIndex, hamming_distances
 
 
 @dataclass
-class HierHashFusionConfig:
+class HierarchicalCodeFusionConfig:
     routing_mode: str = "legacy"
     pattern_level: str = "l3"
     path_max_len: int = 3
@@ -28,7 +28,7 @@ class HierHashFusionConfig:
     max_route_candidates: int = 4096
     bucket_max_size: int = 512
     struct_hamming_candidates: int = 512
-    global_hash_candidates: int = 1024
+    code_scan_candidates: int = 1024
     max_rerank_candidates: int = 1536
 
     def validate(self):
@@ -46,7 +46,7 @@ class HierHashFusionConfig:
             "max_route_candidates": self.max_route_candidates,
             "bucket_max_size": self.bucket_max_size,
             "struct_hamming_candidates": self.struct_hamming_candidates,
-            "global_hash_candidates": self.global_hash_candidates,
+            "code_scan_candidates": self.code_scan_candidates,
             "max_rerank_candidates": self.max_rerank_candidates,
         }
         invalid = [name for name, value in positive_fields.items() if value <= 0]
@@ -72,12 +72,12 @@ def _relative_path(path, base_dir):
     return osp.relpath(osp.abspath(path), osp.abspath(base_dir))
 
 
-class HierHashFusionIndex:
-    """Parallel hierarchy and global-hash retrieval with continuous reranking."""
+class HierarchicalCodeFusionIndex:
+    """Parallel hierarchy and code-scan retrieval with continuous reranking."""
 
-    def __init__(self, hash_index, config=None):
-        self.hash_index = hash_index
-        self.config = config or HierHashFusionConfig()
+    def __init__(self, code_index, config=None):
+        self.code_index = code_index
+        self.config = config or HierarchicalCodeFusionConfig()
         self.config.validate()
         self.router = None
         self.hierarchy_dir = None
@@ -97,9 +97,9 @@ class HierHashFusionIndex:
 
     def _router_config(self):
         return ANNConfig(
-            metric=self.hash_index.config.metric,
+            metric=self.code_index.config.metric,
             backend="exact",
-            normalize=self.hash_index.config.normalize,
+            normalize=self.code_index.config.normalize,
             pattern_level=self.config.pattern_level,
             path_max_len=self.config.path_max_len,
             l3_top_r=self.config.l3_top_r,
@@ -112,10 +112,10 @@ class HierHashFusionIndex:
 
     def build(self, trajectories, hierarchy_dir, metadata=None, metadata_info=None):
         trajectories = np.asarray(trajectories, dtype=object)
-        if len(trajectories) != len(self.hash_index.embeddings):
+        if len(trajectories) != len(self.code_index.embeddings):
             raise ValueError(
-                f"Trajectory count ({len(trajectories)}) does not match hash index size "
-                f"({len(self.hash_index.embeddings)})."
+                f"Trajectory count ({len(trajectories)}) does not match code index size "
+                f"({len(self.code_index.embeddings)})."
             )
         router = HierarchicalTrajectoryANN(self._router_config())
         router.trajectories = trajectories
@@ -313,7 +313,7 @@ class HierHashFusionIndex:
         route_ids = np.asarray(selected_ids, dtype=np.int64)
         route_pool_before_cap = int(len(route_ids))
         if query_code is not None and len(route_ids) > self.config.max_route_candidates:
-            distances = hamming_distances(query_code, self.hash_index.codes[route_ids])
+            distances = hamming_distances(query_code, self.code_index.codes[route_ids])
             route_ids = route_ids[_topk_indices(distances, self.config.max_route_candidates)]
         return route_ids, {
             "l2_count": int(len(selected_l2)),
@@ -357,7 +357,7 @@ class HierHashFusionIndex:
         exclude_ids = np.asarray(sorted(set(exclude_ids or [])), dtype=np.int64)
         if len(exclude_ids) and len(route_ids):
             route_ids = route_ids[~np.isin(route_ids, exclude_ids)]
-        distances = hamming_distances(query_code, self.hash_index.codes[route_ids])
+        distances = hamming_distances(query_code, self.code_index.codes[route_ids])
         raw_order = _topk_indices(distances, self.config.struct_hamming_candidates)
         raw_ids = route_ids[raw_order].astype(np.int64, copy=False)
 
@@ -379,10 +379,10 @@ class HierHashFusionIndex:
             raise RuntimeError("The fusion index has not been built or loaded.")
         if top_k <= 0:
             raise ValueError("top_k must be positive.")
-        if top_k > self.config.global_hash_candidates:
+        if top_k > self.config.code_scan_candidates:
             raise ValueError(
-                f"top_k={top_k} exceeds global_hash_candidates="
-                f"{self.config.global_hash_candidates}."
+                f"top_k={top_k} exceeds code_scan_candidates="
+                f"{self.config.code_scan_candidates}."
             )
         if top_k > self.config.max_rerank_candidates:
             raise ValueError(
@@ -390,12 +390,12 @@ class HierHashFusionIndex:
                 f"{self.config.max_rerank_candidates}."
             )
         if query_code is None:
-            query_code = self.hash_index.encode_query_code(query_embedding)
+            query_code = self.code_index.encode_query_code(query_embedding)
         query_code = np.asarray(query_code, dtype=np.uint8).reshape(-1)
 
-        global_ids, _, global_details = self.hash_index.hamming_search(
+        global_ids, _, global_details = self.code_index.hamming_search(
             query_code,
-            candidate_limit=self.config.global_hash_candidates,
+            candidate_limit=self.config.code_scan_candidates,
             minimum_candidates=top_k,
             exclude_ids=exclude_ids,
         )
@@ -417,11 +417,11 @@ class HierHashFusionIndex:
         union_count_before_cap = int(len(candidate_ids))
         candidate_ids_before_cap = candidate_ids
         if len(candidate_ids) > self.config.max_rerank_candidates:
-            union_hamming = hamming_distances(query_code, self.hash_index.codes[candidate_ids])
+            union_hamming = hamming_distances(query_code, self.code_index.codes[candidate_ids])
             order = _topk_indices(union_hamming, self.config.max_rerank_candidates)
             candidate_ids = candidate_ids[order]
 
-        ids, distances = self.hash_index.rerank_continuous(
+        ids, distances = self.code_index.rerank_continuous(
             query_embedding, candidate_ids, top_k
         )
         if not return_details:
@@ -444,7 +444,7 @@ class HierHashFusionIndex:
             **route_details,
         }
 
-    def save(self, index_dir, hash_index_dir):
+    def save(self, index_dir, code_index_dir):
         if self.router is None or self.metadata is None:
             raise RuntimeError("Cannot save an unbuilt fusion index.")
         os.makedirs(index_dir, exist_ok=True)
@@ -458,21 +458,21 @@ class HierHashFusionIndex:
         payload = {
             "format_version": 1,
             "config": asdict(self.config),
-            "hash_index_dir": _relative_path(hash_index_dir, index_dir),
+            "code_index_dir": _relative_path(code_index_dir, index_dir),
             "hierarchy_dir": _relative_path(self.hierarchy_dir, index_dir),
-            "num_vectors": int(len(self.hash_index.embeddings)),
+            "num_vectors": int(len(self.code_index.embeddings)),
             "metadata": self.metadata_info,
         }
         with open(osp.join(index_dir, "fusion_config.json"), "w", encoding="utf-8") as file:
             json.dump(payload, file, indent=2)
 
     @classmethod
-    def load(cls, index_dir, mmap=True, hash_index_dir=None, hierarchy_dir=None):
+    def load(cls, index_dir, mmap=True, code_index_dir=None, hierarchy_dir=None):
         with open(osp.join(index_dir, "fusion_config.json"), "r", encoding="utf-8") as file:
             payload = json.load(file)
-        hash_index_dir = hash_index_dir or osp.join(index_dir, payload["hash_index_dir"])
+        code_index_dir = code_index_dir or osp.join(index_dir, payload["code_index_dir"])
         hierarchy_dir = hierarchy_dir or osp.join(index_dir, payload["hierarchy_dir"])
-        hash_index = HashGlobalIndex.load(osp.abspath(hash_index_dir), mmap=mmap)
+        code_index = BinaryCodeIndex.load(osp.abspath(code_index_dir), mmap=mmap)
         metadata_file = np.load(osp.join(index_dir, "routing_metadata.npz"), allow_pickle=True)
         metadata = {
             "l3_regions": metadata_file["l3_regions"],
@@ -483,8 +483,8 @@ class HierHashFusionIndex:
         if payload["config"].get("routing_mode", "legacy") == "hierarchical":
             if metadata["l2_buckets"] is None:
                 raise ValueError("Hierarchical fusion indexes require l2_buckets metadata; rebuild the index.")
-        index = cls(hash_index, HierHashFusionConfig(**payload["config"]))
-        empty_trajectories = np.empty(len(hash_index.embeddings), dtype=object)
+        index = cls(code_index, HierarchicalCodeFusionConfig(**payload["config"]))
+        empty_trajectories = np.empty(len(code_index.embeddings), dtype=object)
         index.build(
             empty_trajectories,
             osp.abspath(hierarchy_dir),

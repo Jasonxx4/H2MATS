@@ -1,4 +1,4 @@
-"""Build label-aligned metric distances for hash-head distillation.
+"""Build label-aligned metric distances for code-encoder distillation.
 
 The output row ``i`` corresponds to validation_embeddings[i] and the output
 column ``j`` corresponds to validation_embeddings[i]'s labels[j].  Computing
@@ -11,7 +11,7 @@ import os.path as osp
 
 import numpy as np
 
-from hier_hash_large_scale import load_embedding_payload
+from hierarchical_code_large_scale import load_embedding_payload
 from trajectory_metric_backend import TrajectoryMetricBackend
 
 
@@ -95,7 +95,7 @@ def build_distances(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Build validation label-aligned TP distances for hash training."
+        description="Build validation label-aligned TP distances for code-encoder training."
     )
     parser.add_argument("--embedding-file", required=True)
     parser.add_argument("--output-file", required=True)

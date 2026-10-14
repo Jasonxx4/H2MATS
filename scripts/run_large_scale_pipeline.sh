@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end large-scale experiment: builds the augmented Query/Gallery
 # benchmark, exports the embeddings, and evaluates candidate selection over
-# growing gallery sizes. The hash heads come from run_candidate_selection.sh.
+# growing gallery sizes. The code encoders come from run_candidate_selection.sh.
 # Usage: bash scripts/run_large_scale_pipeline.sh <checkpoint> [extra args]
 set -euo pipefail
 
@@ -20,15 +20,15 @@ fi
 
 BENCHMARK_DIR="${H2MATS_BENCHMARK_DIR:-ann_artifacts/${DATASET}/${DISTANCE_TYPE}/augmented_1m}"
 OUTPUT_DIR="${H2MATS_OUTPUT_DIR:-${BENCHMARK_DIR}/candidate_selection}"
-HASH_ASSETS_DIR="${H2MATS_HASH_ASSETS_DIR:-ann_artifacts/${DATASET}/${DISTANCE_TYPE}/candidate_selection/hash_assets}"
-CANDIDATE_HASH_MODEL="${H2MATS_CANDIDATE_HASH_MODEL:-${HASH_ASSETS_DIR}/hash_head_128_candidate.pt}"
-METRIC_HASH_MODEL="${H2MATS_METRIC_HASH_MODEL:-${HASH_ASSETS_DIR}/hash_head_128_metric.pt}"
+CODE_ASSETS_DIR="${H2MATS_CODE_ASSETS_DIR:-ann_artifacts/${DATASET}/${DISTANCE_TYPE}/candidate_selection/code_assets}"
+BASE_CODE_MODEL="${H2MATS_BASE_CODE_MODEL:-${CODE_ASSETS_DIR}/code_encoder_128_base.pt}"
+METRIC_CODE_MODEL="${H2MATS_METRIC_CODE_MODEL:-${CODE_ASSETS_DIR}/code_encoder_128_metric.pt}"
 POINT_DISTANCE_FILE="${H2MATS_POINT_DISTANCE_FILE:-ground_truth/${DATASET}/Point_dis_matrix.npy}"
 QUERY_COUNT="${H2MATS_QUERY_COUNT:-2000}"
 TP_DISTANCE_TABLE_FILE="${H2MATS_TP_DISTANCE_TABLE_FILE:-${BENCHMARK_DIR}/tp_distance_table_q${QUERY_COUNT}_g1000000.npy}"
 HIERARCHY_DIR="${H2MATS_HIERARCHY_DIR:-dataset/${DATASET}/hierarchy_louvain}"
 GALLERY_SIZES="${H2MATS_GALLERY_SIZES:-500000,1000000}"
-HASH_DEVICE="${H2MATS_HASH_CUDA:-cuda:0}"
+CODE_DEVICE="${H2MATS_CODE_CUDA:-cuda:0}"
 MODEL_CUDA="${H2MATS_MODEL_CUDA:-0}"
 TP_THREADS="${H2MATS_TP_THREADS:-64}"
 
@@ -40,8 +40,8 @@ require_file() {
 }
 
 require_file "${CHECKPOINT}"
-require_file "${CANDIDATE_HASH_MODEL}"
-require_file "${METRIC_HASH_MODEL}"
+require_file "${BASE_CODE_MODEL}"
+require_file "${METRIC_CODE_MODEL}"
 require_file "${POINT_DISTANCE_FILE}"
 if [[ ! -d "${HIERARCHY_DIR}" ]]; then
   echo "[error] hierarchy directory not found: ${HIERARCHY_DIR}" >&2
@@ -58,8 +58,8 @@ ARGS=(
   --benchmark-dir "${BENCHMARK_DIR}"
   --output-dir "${OUTPUT_DIR}"
   --model "${CHECKPOINT}"
-  --hash-model-file "${CANDIDATE_HASH_MODEL}"
-  --metric-hash-model-file "${METRIC_HASH_MODEL}"
+  --code-model-file "${BASE_CODE_MODEL}"
+  --metric-code-model-file "${METRIC_CODE_MODEL}"
   --hierarchy-dir "${HIERARCHY_DIR}"
   --tp-point-distance-file "${POINT_DISTANCE_FILE}"
   --tp-distance-table-file "${TP_DISTANCE_TABLE_FILE}"
@@ -84,8 +84,8 @@ ARGS=(
   --global-candidates 768
   --max-rerank-candidates 960
   --hamming-candidates 768
-  --hash-backend "${H2MATS_HASH_BACKEND:-mih}"
-  --hash-flat-block-size "${H2MATS_HASH_FLAT_BLOCK_SIZE:-65536}"
+  --code-backend "${H2MATS_CODE_BACKEND:-mih}"
+  --code-flat-block-size "${H2MATS_CODE_FLAT_BLOCK_SIZE:-65536}"
   --adaptive-max-rerank 960
   --dual-metric-search-candidates 256
   --dual-metric-candidates 64
@@ -96,15 +96,15 @@ ARGS=(
   --dual-metric-head-protect 48
   --dual-metric-structural-protect 16
   --dual-metric-embedding-weight 0.96
-  --dual-metric-hash-weight 0.02
+  --dual-metric-code-weight 0.02
   --dual-metric-topology-weight 0.02
-  --metric-prefilter-hash-score soft
+  --metric-prefilter-code-score soft
   --adaptive-preserve-global-top50
-  --include-global-hash
-  --skip-hash-training
+  --include-code-scan
+  --skip-code-training
   --skip-hnsw
-  --hash-device "${HASH_DEVICE}"
-  --topology-query-code-device "${HASH_DEVICE}"
+  --code-device "${CODE_DEVICE}"
+  --topology-query-code-device "${CODE_DEVICE}"
   --cuda "${MODEL_CUDA}"
   --tp-num-threads "${TP_THREADS}"
 )

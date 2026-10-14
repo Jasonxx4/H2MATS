@@ -474,6 +474,6 @@ class TrajectoryMetricBackend:
                     int(self.neterp_anchor_node),
                 )
             else:
-                raise RuntimeError("Embedding distances are computed by the hash index.")
+                raise RuntimeError("Embedding distances are computed by the code index.")
             distances[row_id] = np.float32(value)
         return distances

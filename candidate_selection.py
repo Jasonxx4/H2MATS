@@ -1,4 +1,4 @@
-"""Large-scale TopoRouteHash evaluation with multi-resolution path postings."""
+"""Large-scale candidate selection evaluation with multi-resolution path postings."""
 
 import argparse
 import gc
@@ -14,7 +14,7 @@ import numpy as np
 
 from ann_index import load_hierarchy_arrays
 from dual_metric_fusion import load_weight_payload
-from hier_hash_large_scale import (
+from hierarchical_code_large_scale import (
     _candidate_source_stats,
     _directory_size,
     _distribution_stats,
@@ -40,11 +40,11 @@ from trajectory_metric_backend import TrajectoryMetricBackend
 
 
 METHODS = (
-    "topo-route-hash",
-    "adaptive-topo-hash",
+    "hierarchical-route",
+    "adaptive-selection",
     "adaptive-dual-metric",
     "adaptive-dual-metric-no-rerank",
-    "global-hash",
+    "code-scan",
     "exact",
 )
 _MASK64 = (1 << 64) - 1
@@ -60,7 +60,7 @@ def _packed_hamming_distances(query_code, codes):
             f"gallery={codes.shape}."
         )
     try:
-        from hash_global import hamming_distances
+        from binary_codes import hamming_distances
     except ImportError:
         # Keep lightweight tests usable when torch is not installed.
         return np.unpackbits(
@@ -380,10 +380,10 @@ class CompactPostingIndex:
 
 
 @dataclass
-class TopoRouteHashConfig:
-    # ``hybrid`` uses L3/L2 postings plus Global Hash candidates.  The
-    # ``global-only`` mode keeps only Global Hash candidates and applies the
-    # topology score as a reranker, which is cheaper when Global Hash already
+class CandidateSelectionConfig:
+    # ``hybrid`` uses L3/L2 postings plus Code-Scan candidates.  The
+    # ``global-only`` mode keeps only Code-Scan candidates and applies the
+    # topology score as a reranker, which is cheaper when Code-Scan already
     # has near-complete candidate recall.
     candidate_source: str = "hybrid"
     qgram: int = 2
@@ -404,7 +404,7 @@ class TopoRouteHashConfig:
     # score mass is split between embedding and topology explicitly.
     hierarchy_embedding_weight: float = 0.0
     topology_weight: float = -1.0
-    # Adaptive retrieval keeps a Global Hash core and adds topology rescue
+    # Adaptive retrieval keeps a Code-Scan core and adds topology rescue
     # candidates only for queries whose two routes disagree.
     adaptive_initial_global: int = 512
     adaptive_initial_structural: int = 256
@@ -425,7 +425,7 @@ class TopoRouteHashConfig:
     # metric pool; uncertain or expanded rescues use the full budget.
     adaptive_rescue_quality_overlap: float = 0.75
     adaptive_rescue_near_margin_fraction: float = 0.80
-    # Optional candidate-set guarantee: derive the Global Hash embedding Top-50
+    # Optional candidate-set guarantee: derive the Code-Scan embedding Top-50
     # from the full Hamming pool and keep all of it eligible for metric reranking.
     adaptive_preserve_global_top50: bool = False
     # Expensive trajectory metrics are evaluated only after this cheap
@@ -436,8 +436,8 @@ class TopoRouteHashConfig:
     metric_prefilter_global_protect: int = 64
     metric_prefilter_structural_protect: int = 32
     metric_prefilter_embedding_weight: float = 1.0
-    metric_prefilter_hash_weight: float = 0.0
-    metric_prefilter_hash_score: str = "hamming"
+    metric_prefilter_code_weight: float = 0.0
+    metric_prefilter_code_score: str = "hamming"
     metric_prefilter_soft_temperature: float = 1.0
     # Independent Metric-Head retrieval used by adaptive-dual-metric.  The
     # first budget controls its MIH search, the second controls how many of
@@ -451,7 +451,7 @@ class TopoRouteHashConfig:
     dual_metric_head_protect: int = 48
     dual_metric_structural_protect: int = 16
     dual_metric_embedding_weight: float = 0.40
-    dual_metric_hash_weight: float = 0.40
+    dual_metric_code_weight: float = 0.40
     dual_metric_topology_weight: float = 0.20
     seed: int = 2026
 
@@ -485,7 +485,7 @@ class TopoRouteHashConfig:
         }
         invalid = [name for name, value in integer_positive.items() if value <= 0]
         if invalid:
-            raise ValueError(f"TopoRouteHash parameters must be positive: {invalid}")
+            raise ValueError(f"Candidate selection parameters must be positive: {invalid}")
         if self.l3_expand_hops < 0:
             raise ValueError("l3_expand_hops cannot be negative.")
         if self.max_route_candidates < self.min_route_candidates:
@@ -520,15 +520,15 @@ class TopoRouteHashConfig:
             raise ValueError("metric_prefilter_structural_protect cannot be negative.")
         if self.metric_prefilter_embedding_weight < 0.0:
             raise ValueError("metric_prefilter_embedding_weight cannot be negative.")
-        if self.metric_prefilter_hash_weight < 0.0:
-            raise ValueError("metric_prefilter_hash_weight cannot be negative.")
-        if self.metric_prefilter_hash_score not in {"hamming", "soft"}:
-            raise ValueError("metric_prefilter_hash_score must be hamming or soft.")
+        if self.metric_prefilter_code_weight < 0.0:
+            raise ValueError("metric_prefilter_code_weight cannot be negative.")
+        if self.metric_prefilter_code_score not in {"hamming", "soft"}:
+            raise ValueError("metric_prefilter_code_score must be hamming or soft.")
         if self.metric_prefilter_soft_temperature <= 0.0:
             raise ValueError("metric_prefilter_soft_temperature must be positive.")
         if (
             self.metric_prefilter_embedding_weight
-            + self.metric_prefilter_hash_weight <= 0.0
+            + self.metric_prefilter_code_weight <= 0.0
         ):
             raise ValueError("At least one metric prefilter score weight must be positive.")
         if self.metric_prefilter_candidates <= 0:
@@ -570,7 +570,7 @@ class TopoRouteHashConfig:
             raise ValueError("Dual-metric source protection budgets cannot be negative.")
         dual_weights = (
             self.dual_metric_embedding_weight,
-            self.dual_metric_hash_weight,
+            self.dual_metric_code_weight,
             self.dual_metric_topology_weight,
         )
         if min(dual_weights) < 0.0 or sum(dual_weights) <= 0.0:
@@ -607,19 +607,19 @@ class TopoRouteHashConfig:
                 )
 
 
-class TopoRouteHashIndex:
-    """L3 posting routing, L2/L1 path refinement, and Global Hash fallback."""
+class CandidateSelectionIndex:
+    """L3 posting routing, L2/L1 path refinement, and Code-Scan fallback."""
 
-    def __init__(self, hash_index, hierarchy, config=None):
-        self.hash_index = hash_index
+    def __init__(self, code_index, hierarchy, config=None):
+        self.code_index = code_index
         # Optional second code space used only by the expensive-metric
-        # prefilter. The packed global hash codes remain in hash_index.codes.
+        # prefilter. The packed base codes remain in code_index.codes.
         self.metric_prefilter_codes = None
         self.metric_prefilter_soft_codes = None
-        self.metric_hash_index = None
+        self.metric_code_index = None
         self.dual_metric_weight_payload = None
         self.hierarchy = hierarchy
-        self.config = config or TopoRouteHashConfig()
+        self.config = config or CandidateSelectionConfig()
         self.config.validate()
         self.seeds = np.asarray(
             [_mix64(self.config.seed + offset) for offset in range(self.config.minhash_size)],
@@ -825,12 +825,12 @@ class TopoRouteHashIndex:
 
     def _continuous_distances(self, query_embedding, candidate_ids):
         query_embedding = np.asarray(query_embedding, dtype=np.float32).reshape(-1)
-        if self.hash_index.config.normalize or self.hash_index.config.metric == "cosine":
+        if self.code_index.config.normalize or self.code_index.config.metric == "cosine":
             query_embedding = query_embedding / max(
                 float(np.linalg.norm(query_embedding)), 1e-12
             )
-        gallery = self.hash_index.embeddings[candidate_ids].astype(np.float32)
-        if self.hash_index.config.metric == "cosine":
+        gallery = self.code_index.embeddings[candidate_ids].astype(np.float32)
+        if self.code_index.config.metric == "cosine":
             return (1.0 - gallery @ query_embedding).astype(np.float32)
         difference = gallery - query_embedding.reshape(1, -1)
         return np.einsum("ij,ij->i", difference, difference).astype(np.float32)
@@ -843,7 +843,7 @@ class TopoRouteHashIndex:
         gallery = np.asarray(self.scale_embeddings[candidate_ids], dtype=np.float32)
         if query.ndim != 2 or gallery.ndim != 3 or query.shape[0] != gallery.shape[1]:
             raise ValueError("Query/Gallery scale embeddings have incompatible shapes.")
-        if self.hash_index.config.metric == "cosine" or self.hash_index.config.normalize:
+        if self.code_index.config.metric == "cosine" or self.code_index.config.normalize:
             query = query / np.maximum(np.linalg.norm(query, axis=1, keepdims=True), 1e-12)
             gallery = gallery / np.maximum(np.linalg.norm(gallery, axis=2, keepdims=True), 1e-12)
             distances = 1.0 - np.einsum("sd,nsd->ns", query, gallery)
@@ -872,7 +872,7 @@ class TopoRouteHashIndex:
         *, global_candidates=None, structural_candidates=None,
         source_cache=None,
     ):
-        """Return route, structural, and Global Hash candidates without reranking.
+        """Return route, structural, and Code-Scan candidates without reranking.
 
         This is shared by adaptive metric-aware wrappers.  The legacy ``query``
         path keeps its original defaults, while callers can request a larger
@@ -917,7 +917,7 @@ class TopoRouteHashIndex:
                     "route_after_cap": 0,
                     "expanded_l3_tokens": 0,
                 }
-            global_ids, _, global_details = self.hash_index.hamming_search(
+            global_ids, _, global_details = self.code_index.hamming_search(
                 query_code,
                 candidate_limit=active_global,
                 minimum_candidates=top_k,
@@ -984,7 +984,7 @@ class TopoRouteHashIndex:
             }
         if global_cache is None:
             global_ids, global_distances, global_details = (
-                self.hash_index.hamming_search(
+                self.code_index.hamming_search(
                     query_code,
                     candidate_limit=global_limit,
                     minimum_candidates=top_k,
@@ -1100,7 +1100,7 @@ class TopoRouteHashIndex:
             json.dump(asdict(self.config), file, indent=2)
 
 
-class AdaptiveTopoHashIndex(TopoRouteHashIndex):
+class AdaptiveCandidateSelectionIndex(CandidateSelectionIndex):
     """Adaptive Global-core/topology-rescue retrieval with metric reranking."""
 
     def set_dual_metric_weight_payload(self, payload):
@@ -1120,7 +1120,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
         else:
             weights = (
                 self.config.dual_metric_embedding_weight,
-                self.config.dual_metric_hash_weight,
+                self.config.dual_metric_code_weight,
                 self.config.dual_metric_topology_weight,
             )
         weights = np.asarray(weights, dtype=np.float32)
@@ -1132,7 +1132,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
             return 0.0, False
         probe = min(len(distances), max(2, min(initial_count, 32)))
         margin = float(distances[probe - 1] - distances[0]) / max(
-            float(getattr(self.hash_index.config, "bits", 1)), 1.0
+            float(getattr(self.code_index.config, "bits", 1)), 1.0
         )
         return margin, margin >= self.config.adaptive_global_margin
 
@@ -1211,15 +1211,15 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
         if fill_count > 0 and len(remaining):
             embedding_distance = self._continuous_distances(query_embedding, remaining)
             embedding_rank = self._rank_fraction(embedding_distance)
-            hash_weight = float(self.config.metric_prefilter_hash_weight)
+            code_weight = float(self.config.metric_prefilter_code_weight)
             embedding_weight = float(self.config.metric_prefilter_embedding_weight)
-            if hash_weight > 0.0:
+            if code_weight > 0.0:
                 if query_code is None:
                     raise ValueError(
-                        "Hash-aware metric prefilter requires the packed query code."
+                        "Code-aware metric prefilter requires the packed query code."
                     )
                 if (
-                    self.config.metric_prefilter_hash_score == "soft"
+                    self.config.metric_prefilter_code_score == "soft"
                     and self.metric_prefilter_soft_codes is not None
                     and np.asarray(query_code).ndim == 1
                     and np.asarray(query_code).shape[0] == self.metric_prefilter_soft_codes.shape[1]
@@ -1229,11 +1229,11 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
                     ].astype(np.float32, copy=False)
                     query_soft_code = np.asarray(query_code, dtype=np.float32)
                     bits = float(gallery_codes.shape[1])
-                    hash_distance = (
+                    code_distance = (
                         bits - np.einsum("ij,j->i", gallery_codes, query_soft_code)
                     ) / (2.0 * bits)
                 else:
-                    if self.config.metric_prefilter_hash_score == "soft":
+                    if self.config.metric_prefilter_code_score == "soft":
                         raise ValueError(
                             "Soft metric prefilter requires metric_prefilter_soft_codes "
                             "and a continuous query metric code."
@@ -1241,17 +1241,17 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
                     gallery_codes = (
                         self.metric_prefilter_codes
                         if self.metric_prefilter_codes is not None
-                        else self.hash_index.codes
+                        else self.code_index.codes
                     )
-                    hash_distance = _packed_hamming_distances(
+                    code_distance = _packed_hamming_distances(
                         query_code, gallery_codes[remaining]
                     )
-                hash_rank = self._rank_fraction(hash_distance)
+                code_rank = self._rank_fraction(code_distance)
             else:
-                hash_rank = 0.0
+                code_rank = 0.0
             prefilter_score = (
-                embedding_weight * embedding_rank + hash_weight * hash_rank
-            ) / max(embedding_weight + hash_weight, 1e-12)
+                embedding_weight * embedding_rank + code_weight * code_rank
+            ) / max(embedding_weight + code_weight, 1e-12)
             fill = remaining[_topk_indices(prefilter_score, fill_count)]
         else:
             fill = np.empty((0,), dtype=np.int64)
@@ -1286,18 +1286,18 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
 
         This method is deliberately separate from ``_metric_prefilter_candidates``:
         the latter can only reorder an existing pool, while this branch adds
-        candidates that Global Hash did not retrieve.
+        candidates that Code-Scan did not retrieve.
         """
-        if self.metric_hash_index is None:
+        if self.metric_code_index is None:
             raise RuntimeError(
-                "adaptive-dual-metric requires an independent Metric Hash index."
+                "adaptive-dual-metric requires an independent metric code index."
             )
         if metric_query_code is None:
             raise ValueError(
                 "adaptive-dual-metric requires packed Metric-Head query codes."
             )
         metric_ids, metric_distances, metric_details = (
-            self.metric_hash_index.hamming_search(
+            self.metric_code_index.hamming_search(
                 metric_query_code,
                 candidate_limit=self.config.dual_metric_search_candidates,
                 minimum_candidates=min(50, int(tp_budget)),
@@ -1306,7 +1306,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
         )
         metric_ids = np.asarray(metric_ids, dtype=np.int64)
         if (
-            self.config.metric_prefilter_hash_score == "soft"
+            self.config.metric_prefilter_code_score == "soft"
             and self.metric_prefilter_soft_codes is not None
             and metric_score_query_code is not None
         ):
@@ -1362,7 +1362,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
             self._structural_distances(features, universe)
         )
         if (
-            self.config.metric_prefilter_hash_score == "soft"
+            self.config.metric_prefilter_code_score == "soft"
             and self.metric_prefilter_soft_codes is not None
             and metric_score_query_code is not None
         ):
@@ -1376,7 +1376,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
             ) / (2.0 * bits)
         else:
             metric_distance = _packed_hamming_distances(
-                metric_query_code, self.metric_hash_index.codes[universe]
+                metric_query_code, self.metric_code_index.codes[universe]
             )
         metric_rank = self._rank_fraction(metric_distance)
         weights = self._dual_metric_weights(
@@ -1472,7 +1472,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
         force_global_fast_path=False,
         force_metric_rerank=False,
         metric_query_code=None,
-        metric_hash_query_code=None,
+        metric_code_query_code=None,
         dual_metric_mode=False,
         dual_metric_no_rerank=False,
         collect_dual_metric_features=False,
@@ -1526,11 +1526,11 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
         global_margin = 0.0
         global_top50_ids = None
         global_baseline_limit = int(
-            getattr(self.hash_index.config, "hamming_candidates", 0)
+            getattr(self.code_index.config, "hamming_candidates", 0)
         )
         if preserve_global_top50 and global_baseline_limit < 50:
             raise ValueError(
-                "adaptive_preserve_global_top50 requires at least 50 Global Hash "
+                "adaptive_preserve_global_top50 requires at least 50 Code-Scan "
                 "Hamming candidates."
             )
         global_search_limit = cfg.adaptive_max_global
@@ -1561,7 +1561,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
             global_fast_path = cfg.adaptive_gate == "global" or confident
         elif cfg.adaptive_gate in {"global", "hybrid"}:
             global_ids, global_distances, global_details = (
-                self.hash_index.hamming_search(
+                self.code_index.hamming_search(
                     query_code,
                     candidate_limit=initial_global_limit,
                     minimum_candidates=top_k,
@@ -1576,7 +1576,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
             global_margin, confident = self._global_confidence(
                 global_distances, cfg.adaptive_initial_global
             )
-            # ``global`` is an explicit Global-Hash-only fast mode.  The
+            # ``global`` is an explicit Code-Scan-only fast mode.  The
             # ``hybrid`` mode uses the margin only as a gate and falls back to
             # topology rescue for uncertain queries.
             global_fast_path = cfg.adaptive_gate == "global" or confident
@@ -1595,7 +1595,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
                 if cfg.adaptive_metric_fast_path == "metric":
                     candidate_ids = global_cache["global_ids"]
                     global_reference_ids = candidate_ids[:global_baseline_limit]
-                    global_top50_ids, _ = self.hash_index.rerank_continuous(
+                    global_top50_ids, _ = self.code_index.rerank_continuous(
                         query_embedding,
                         global_reference_ids,
                         min(50, len(global_reference_ids)),
@@ -1753,7 +1753,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
             stage = 1
             if len(source_cache["global_ids"]) < cfg.adaptive_max_global:
                 expanded_ids, expanded_distances, expanded_details = (
-                    self.hash_index.hamming_search(
+                    self.code_index.hamming_search(
                         query_code,
                         candidate_limit=global_search_limit,
                         minimum_candidates=top_k,
@@ -1785,7 +1785,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
         )
         if protect_global_for_tp:
             global_reference_ids = source_cache["global_ids"][:global_baseline_limit]
-            global_top50_ids, _ = self.hash_index.rerank_continuous(
+            global_top50_ids, _ = self.code_index.rerank_continuous(
                 query_embedding,
                 global_reference_ids,
                 min(50, len(global_reference_ids)),
@@ -1912,7 +1912,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
                     features,
                     global_ids,
                     structural_ids,
-                    metric_hash_query_code,
+                    metric_code_query_code,
                     metric_query_code,
                     global_top50_ids,
                     metric_budget,
@@ -1962,7 +1962,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
             ranked_candidate_ids = dual_metric_no_rerank_ids
             order = np.arange(min(top_k, len(ranked_candidate_ids)), dtype=np.int64)
             final_scores = np.arange(len(order), dtype=np.float32)
-            rerank_name = "dual-hash-fused"
+            rerank_name = "dual-code-fused"
         else:
             ranked_candidate_ids = (
                 dual_metric_no_rerank_ids
@@ -2064,7 +2064,7 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
         query_embedding,
         query_trajectory,
         query_code,
-        metric_hash_query_code,
+        metric_code_query_code,
         top_k=50,
         **kwargs,
     ):
@@ -2074,16 +2074,16 @@ class AdaptiveTopoHashIndex(TopoRouteHashIndex):
             query_trajectory,
             query_code,
             top_k=top_k,
-            metric_hash_query_code=metric_hash_query_code,
+            metric_code_query_code=metric_code_query_code,
             dual_metric_mode=True,
             **kwargs,
         )
 
 
-def _hash_config(args, head):
-    from hash_global import HashGlobalConfig
+def _code_config(args, head):
+    from binary_codes import BinaryCodeIndexConfig
 
-    return HashGlobalConfig(
+    return BinaryCodeIndexConfig(
         bits=head.config.bits,
         subcode_bits=16,
         probe_radius=args.probe_radius,
@@ -2092,16 +2092,16 @@ def _hash_config(args, head):
         normalize=args.normalize,
         embedding_storage=args.embedding_storage,
         encode_batch_size=args.encode_batch_size,
-        backend=getattr(args, "hash_backend", "mih"),
-        flat_block_size=getattr(args, "hash_flat_block_size", 65536),
-        hnsw_m=getattr(args, "hash_hnsw_m", 16),
-        hnsw_ef_construction=getattr(args, "hash_hnsw_ef_construction", 200),
-        hnsw_ef_search=getattr(args, "hash_hnsw_ef_search", 256),
+        backend=getattr(args, "code_backend", "mih"),
+        flat_block_size=getattr(args, "code_flat_block_size", 65536),
+        hnsw_m=getattr(args, "code_hnsw_m", 16),
+        hnsw_ef_construction=getattr(args, "code_hnsw_ef_construction", 200),
+        hnsw_ef_search=getattr(args, "code_hnsw_ef_search", 256),
     )
 
 
 def _topo_config(args):
-    return TopoRouteHashConfig(
+    return CandidateSelectionConfig(
         candidate_source=args.candidate_source,
         qgram=args.qgram,
         minhash_size=args.minhash_size,
@@ -2147,11 +2147,11 @@ def _topo_config(args):
         metric_prefilter_embedding_weight=getattr(
             args, "metric_prefilter_embedding_weight", 1.0
         ),
-        metric_prefilter_hash_weight=getattr(
-            args, "metric_prefilter_hash_weight", 0.0
+        metric_prefilter_code_weight=getattr(
+            args, "metric_prefilter_code_weight", 0.0
         ),
-        metric_prefilter_hash_score=getattr(
-            args, "metric_prefilter_hash_score", "hamming"
+        metric_prefilter_code_score=getattr(
+            args, "metric_prefilter_code_score", "hamming"
         ),
         metric_prefilter_soft_temperature=getattr(
             args, "metric_prefilter_soft_temperature", 1.0
@@ -2181,8 +2181,8 @@ def _topo_config(args):
         dual_metric_embedding_weight=getattr(
             args, "dual_metric_embedding_weight", 0.40
         ),
-        dual_metric_hash_weight=getattr(
-            args, "dual_metric_hash_weight", 0.40
+        dual_metric_code_weight=getattr(
+            args, "dual_metric_code_weight", 0.40
         ),
         dual_metric_topology_weight=getattr(
             args, "dual_metric_topology_weight", 0.20
@@ -2192,10 +2192,10 @@ def _topo_config(args):
 
 
 def _build_index(args, gallery, selected_rows, scale_dir):
-    from hash_global import (
-        HashGlobalIndex,
+    from binary_codes import (
+        BinaryCodeIndex,
         encode_soft_codes,
-        load_hash_head,
+        load_code_encoder,
     )
 
     embeddings = gallery["embeddings"][selected_rows]
@@ -2203,26 +2203,26 @@ def _build_index(args, gallery, selected_rows, scale_dir):
     scale_embeddings = gallery.get("scale_embeddings")
     if scale_embeddings is not None:
         scale_embeddings = scale_embeddings[selected_rows]
-    head, head_metadata = load_hash_head(args.hash_model_file)
-    hash_dir = osp.join(scale_dir, "hash_index")
+    head, head_metadata = load_code_encoder(args.code_model_file)
+    code_dir = osp.join(scale_dir, "code_index")
     topo_dir = osp.join(scale_dir, "topo_index")
     start = perf_counter()
-    hash_index = HashGlobalIndex(_hash_config(args, head)).build(
+    code_index = BinaryCodeIndex(_code_config(args, head)).build(
         embeddings,
         head,
-        encode_device=args.hash_device,
-        metadata={"hash_training": head_metadata},
+        encode_device=args.code_device,
+        metadata={"code_training": head_metadata},
     )
-    hash_seconds = perf_counter() - start
-    hash_index.save(hash_dir)
+    code_seconds = perf_counter() - start
+    code_index.save(code_dir)
     methods = {
         item.strip()
-        for item in str(getattr(args, "methods", "topo-route-hash")).split(",")
+        for item in str(getattr(args, "methods", "hierarchical-route")).split(",")
         if item.strip()
     }
     topology_methods = {
-        "topo-route-hash",
-        "adaptive-topo-hash",
+        "hierarchical-route",
+        "adaptive-selection",
         "adaptive-dual-metric",
         "adaptive-dual-metric-no-rerank",
     }
@@ -2230,47 +2230,47 @@ def _build_index(args, gallery, selected_rows, scale_dir):
     topo_config = _topo_config(args)
     if needs_topology:
         hierarchy = load_hierarchy_arrays(args.hierarchy_dir)
-        topo_index = AdaptiveTopoHashIndex(hash_index, hierarchy, topo_config).build(
+        topo_index = AdaptiveCandidateSelectionIndex(code_index, hierarchy, topo_config).build(
             trajectories, scale_embeddings=scale_embeddings
         )
     else:
-        # Global Hash and Exact do not consume path postings. Avoid building
-        # and saving a full topology index for hash-only large-scale runs.
+        # Code-Scan and Exact do not consume path postings. Avoid building
+        # and saving a full topology index for code-only large-scale runs.
         topo_index = SimpleNamespace(
-            hash_index=hash_index,
-            metric_hash_index=None,
+            code_index=code_index,
+            metric_code_index=None,
             trajectories=trajectories,
             config=topo_config,
             build_seconds=0.0,
         )
-    metric_hash_seconds = 0.0
-    metric_hash_index = None
-    metric_hash_model_file = getattr(args, "metric_hash_model_file", None)
-    if metric_hash_model_file and needs_topology:
-        metric_head, metric_head_metadata = load_hash_head(metric_hash_model_file)
+    metric_code_seconds = 0.0
+    metric_code_index = None
+    metric_code_model_file = getattr(args, "metric_code_model_file", None)
+    if metric_code_model_file and needs_topology:
+        metric_head, metric_head_metadata = load_code_encoder(metric_code_model_file)
         if metric_head.config.bits != head.config.bits:
             raise ValueError(
-                "Candidate and metric hash heads must use the same bit count."
+                "Base and metric code encoders must use the same bit count."
             )
         metric_start = perf_counter()
-        metric_hash_index = HashGlobalIndex(_hash_config(args, metric_head)).build(
+        metric_code_index = BinaryCodeIndex(_code_config(args, metric_head)).build(
             embeddings,
             metric_head,
-            encode_device=args.hash_device,
-            metadata={"hash_training": metric_head_metadata, "role": "metric"},
+            encode_device=args.code_device,
+            metadata={"code_training": metric_head_metadata, "role": "metric"},
         )
-        topo_index.metric_hash_index = metric_hash_index
-        if args.metric_prefilter_hash_score == "soft":
+        topo_index.metric_code_index = metric_code_index
+        if args.metric_prefilter_code_score == "soft":
             topo_index.metric_prefilter_soft_codes = encode_soft_codes(
                 metric_head,
                 embeddings,
                 batch_size=args.encode_batch_size,
-                device=args.hash_device,
+                device=args.code_device,
                 temperature=args.metric_prefilter_soft_temperature,
             )
         else:
-            topo_index.metric_prefilter_codes = metric_hash_index.codes
-        metric_hash_seconds = perf_counter() - metric_start
+            topo_index.metric_prefilter_codes = metric_code_index.codes
+        metric_code_seconds = perf_counter() - metric_start
     dual_metric_weight_file = getattr(args, "dual_metric_weight_file", None)
     if dual_metric_weight_file and needs_topology:
         topo_index.set_dual_metric_weight_payload(
@@ -2280,17 +2280,17 @@ def _build_index(args, gallery, selected_rows, scale_dir):
         topo_index.save(topo_dir)
     np.save(osp.join(scale_dir, "selected_gallery_rows.npy"), selected_rows)
     return topo_index, {
-        "hash_seconds": float(hash_seconds),
-        "hash_backend": hash_index.config.backend,
+        "code_seconds": float(code_seconds),
+        "code_backend": code_index.config.backend,
         "topo_seconds": float(topo_index.build_seconds),
-        "metric_hash_seconds": float(metric_hash_seconds),
-        "metric_hash_backend": (
-            metric_hash_index.config.backend if metric_hash_index is not None else None
+        "metric_code_seconds": float(metric_code_seconds),
+        "metric_code_backend": (
+            metric_code_index.config.backend if metric_code_index is not None else None
         ),
         "total_seconds": float(
-            hash_seconds + metric_hash_seconds + topo_index.build_seconds
+            code_seconds + metric_code_seconds + topo_index.build_seconds
         ),
-        "hash_disk_mb": float(_directory_size(hash_dir) / (1024 ** 2)),
+        "code_disk_mb": float(_directory_size(code_dir) / (1024 ** 2)),
         "topo_disk_mb": (
             float(_directory_size(topo_dir) / (1024 ** 2))
             if needs_topology
@@ -2299,18 +2299,18 @@ def _build_index(args, gallery, selected_rows, scale_dir):
     }
 
 
-def _query_global_hash_tp(
+def _query_code_scan_tp(
     index, query_trajectory, query_code, top_k, metric_backend, exclude_ids=None
 ):
     """Rerank the entire Hamming candidate pool by online TP, without gating."""
     if metric_backend is None or metric_backend.name != "TP":
-        raise ValueError("Global Hash TP reranking requires a TP metric backend.")
+        raise ValueError("Code-Scan TP reranking requires a TP metric backend.")
     if getattr(index, "trajectories", None) is None:
-        raise ValueError("Global Hash TP reranking requires Gallery trajectories.")
+        raise ValueError("Code-Scan TP reranking requires Gallery trajectories.")
     start = perf_counter()
-    candidate_ids, _, details = index.hash_index.hamming_search(
+    candidate_ids, _, details = index.code_index.hamming_search(
         query_code,
-        candidate_limit=index.hash_index.config.hamming_candidates,
+        candidate_limit=index.code_index.config.hamming_candidates,
         minimum_candidates=top_k,
         exclude_ids=exclude_ids,
     )
@@ -2360,8 +2360,8 @@ def _evaluate_method(
     metric_backend=None,
     diagnostic_state=None,
     query_metric_codes=None,
-    query_metric_hash_codes=None,
-    global_hash_rerank_mode="full",
+    query_metric_binary_codes=None,
+    code_scan_rerank_mode="full",
 ):
     # Backward compatibility: older callers passed query_codes in the
     # query_labels position and had no separate label array.
@@ -2381,7 +2381,7 @@ def _evaluate_method(
             exact_max_queries = old_exact
             top_k = old_top_k
     if query_codes is None:
-        raise TypeError("query_codes is required for hash-based retrieval methods.")
+        raise TypeError("query_codes is required for code-based retrieval methods.")
     total = len(query_embeddings)
     if method == "exact" and exact_max_queries > 0:
         total = min(total, exact_max_queries)
@@ -2440,7 +2440,7 @@ def _evaluate_method(
     adaptive_low_confidence = None
     adaptive_probe_ms = np.zeros(total, dtype=np.float64)
     adaptive_methods = {
-        "adaptive-topo-hash",
+        "adaptive-selection",
         "adaptive-dual-metric",
         "adaptive-dual-metric-no-rerank",
     }
@@ -2454,7 +2454,7 @@ def _evaluate_method(
             and cfg.adaptive_gate in {"global", "hybrid"}
             and cfg.adaptive_max_tp_fraction < 1.0
         ):
-            baseline_limit = int(getattr(index.hash_index.config, "hamming_candidates", 0))
+            baseline_limit = int(getattr(index.code_index.config, "hamming_candidates", 0))
             global_search_limit = int(cfg.adaptive_max_global)
             if cfg.adaptive_preserve_global_top50 or dual_metric_method:
                 global_search_limit = max(global_search_limit, baseline_limit)
@@ -2472,7 +2472,7 @@ def _evaluate_method(
                         np.asarray(gallery_source_ids) == query_source_ids[query_id]
                     ).astype(np.int64, copy=False)
                 probe_start = perf_counter()
-                ids, distances, global_details = index.hash_index.hamming_search(
+                ids, distances, global_details = index.code_index.hamming_search(
                     query_codes[query_id],
                     candidate_limit=initial_limit,
                     minimum_candidates=top_k,
@@ -2500,7 +2500,7 @@ def _evaluate_method(
     exact_gallery = None
     if method == "exact":
         exact_gallery = np.asarray(gallery_embeddings, dtype=np.float32)
-        if index.hash_index.config.normalize or index.hash_index.config.metric == "cosine":
+        if index.code_index.config.normalize or index.code_index.config.metric == "cosine":
             exact_gallery = exact_gallery / np.maximum(
                 np.linalg.norm(exact_gallery, axis=1, keepdims=True), 1e-12
             )
@@ -2520,7 +2520,7 @@ def _evaluate_method(
                 np.asarray(gallery_source_ids) == query_source_ids[query_id]
             ).astype(np.int64, copy=False)
         start = perf_counter()
-        if method == "topo-route-hash":
+        if method == "hierarchical-route":
             ids, _, details = index.query(
                 query_embeddings[query_id],
                 query_trajectories[query_id],
@@ -2580,15 +2580,15 @@ def _evaluate_method(
             if method in {
                 "adaptive-dual-metric", "adaptive-dual-metric-no-rerank"
             }:
-                if query_metric_hash_codes is None:
+                if query_metric_binary_codes is None:
                     raise ValueError(
-                        "adaptive-dual-metric requires query_metric_hash_codes."
+                        "adaptive-dual-metric requires query_metric_binary_codes."
                     )
                 ids, _, details = index.query_adaptive_dual_metric(
                     query_embeddings[query_id],
                     query_trajectories[query_id],
                     query_codes[query_id],
-                    query_metric_hash_codes[query_id],
+                    query_metric_binary_codes[query_id],
                     **query_kwargs,
                 )
             else:
@@ -2598,9 +2598,9 @@ def _evaluate_method(
                     query_codes[query_id],
                     **query_kwargs,
                 )
-        elif method == "global-hash":
-            if global_hash_rerank_mode == "tp":
-                ids, _, details = _query_global_hash_tp(
+        elif method == "code-scan":
+            if code_scan_rerank_mode == "tp":
+                ids, _, details = _query_code_scan_tp(
                     index, query_trajectories[query_id], query_codes[query_id],
                     top_k, metric_backend, exclude_ids=exclude_ids,
                 )
@@ -2611,22 +2611,22 @@ def _evaluate_method(
                     )
                 })
             else:
-                ids, _, details = index.hash_index.query(
+                ids, _, details = index.code_index.query(
                     query_embeddings[query_id],
                     top_k=top_k,
                     exclude_ids=exclude_ids,
                     return_details=True,
                     query_code=query_codes[query_id],
-                    rerank_mode=global_hash_rerank_mode,
+                    rerank_mode=code_scan_rerank_mode,
                 )
             candidate_lists["global"].append(details["candidate_ids"])
             candidate_query_ids["global"].append(query_id)
             full_scan += int(details["used_full_scan"])
         elif method == "exact":
             query = np.asarray(query_embeddings[query_id], dtype=np.float32)
-            if index.hash_index.config.normalize or index.hash_index.config.metric == "cosine":
+            if index.code_index.config.normalize or index.code_index.config.metric == "cosine":
                 query = query / max(float(np.linalg.norm(query)), 1e-12)
-            if index.hash_index.config.metric == "cosine":
+            if index.code_index.config.metric == "cosine":
                 distance = 1.0 - exact_gallery @ query
             else:
                 difference = exact_gallery - query.reshape(1, -1)
@@ -2639,7 +2639,7 @@ def _evaluate_method(
             ids = _topk_indices(distance, top_k)
         else:
             raise ValueError(f"Unknown method: {method}")
-        if method in {"topo-route-hash", *adaptive_methods}:
+        if method in {"hierarchical-route", *adaptive_methods}:
             candidate_lists["route"].append(details["route_ids"])
             candidate_lists["structural"].append(details["structural_candidate_ids"])
             candidate_lists["global"].append(details["global_candidate_ids"])
@@ -2781,17 +2781,17 @@ def _evaluate_method(
                 for name, values in details_counts.items()
                 if name.startswith("final_") or name == "top1_from_struct_only"
             }
-            if method in {"topo-route-hash", *adaptive_methods}
+            if method in {"hierarchical-route", *adaptive_methods}
             else None
         ),
     }
-    if method == "global-hash" and global_hash_rerank_mode == "tp":
+    if method == "code-scan" and code_scan_rerank_mode == "tp":
         counts = [item["rerank_candidate_count"] for item in global_tp_details]
         result["tp_rerank"] = {
             "queries": len(global_tp_details),
             "fraction": len(global_tp_details) / total if total else 0.0,
             "gated": False,
-            "candidate_limit": int(index.hash_index.config.hamming_candidates),
+            "candidate_limit": int(index.code_index.config.hamming_candidates),
             "candidate_count_mean": float(np.mean(counts)) if counts else 0.0,
             "candidate_count_min": min(counts, default=0),
             "candidate_count_max": max(counts, default=0),
@@ -2922,15 +2922,15 @@ def _method_comparison(
     topology_method = next(
         (
             method
-            for method in ("adaptive-topo-hash", "topo-route-hash")
+            for method in ("adaptive-selection", "hierarchical-route")
             if method in predictions_by_method
         ),
         None,
     )
-    if topology_method is None or "global-hash" not in predictions_by_method:
+    if topology_method is None or "code-scan" not in predictions_by_method:
         return None
     topo = predictions_by_method[topology_method]
-    global_predictions = predictions_by_method["global-hash"]
+    global_predictions = predictions_by_method["code-scan"]
     total = min(len(topo), len(global_predictions))
     result = {}
     for cutoff in sorted({top_k, *(k for k in (1, 10, 50) if k <= top_k)}):
@@ -3047,7 +3047,7 @@ def run_scale(
     tp_distance_table=None,
     metric_backend=None,
 ):
-    from hash_global import encode_binary_codes, encode_soft_codes
+    from binary_codes import encode_binary_codes, encode_soft_codes
 
     rerank_metric = getattr(args, "rerank_metric", "embedding")
     scale_dir = osp.join(args.output_dir, f"gallery_{gallery_size}")
@@ -3109,24 +3109,24 @@ def run_scale(
         }
     code_start = perf_counter()
     query_codes = encode_binary_codes(
-        index.hash_index.head,
+        index.code_index.head,
         query_embeddings,
         batch_size=args.encode_batch_size,
         device=args.query_code_device,
     )
     code_ms = (perf_counter() - code_start) * 1000.0
     query_metric_codes = None
-    query_metric_hash_codes = None
-    if index.metric_hash_index is not None:
+    query_metric_binary_codes = None
+    if index.metric_code_index is not None:
         metric_code_start = perf_counter()
-        metric_head = index.metric_hash_index.head
-        query_metric_hash_codes = encode_binary_codes(
+        metric_head = index.metric_code_index.head
+        query_metric_binary_codes = encode_binary_codes(
             metric_head,
             query_embeddings,
             batch_size=args.encode_batch_size,
             device=args.query_code_device,
         )
-        if args.metric_prefilter_hash_score == "soft":
+        if args.metric_prefilter_code_score == "soft":
             query_metric_codes = encode_soft_codes(
                 metric_head,
                 query_embeddings,
@@ -3135,7 +3135,7 @@ def run_scale(
                 temperature=args.metric_prefilter_soft_temperature,
             )
         else:
-            query_metric_codes = query_metric_hash_codes
+            query_metric_codes = query_metric_binary_codes
         code_ms += (perf_counter() - metric_code_start) * 1000.0
     code_ms_per_query = code_ms / max(len(query_embeddings), 1)
     methods = tuple(item.strip() for item in args.methods.split(",") if item.strip())
@@ -3146,7 +3146,7 @@ def run_scale(
         diagnostic_state = (
             {}
             if method in {
-                "adaptive-topo-hash",
+                "adaptive-selection",
                 "adaptive-dual-metric",
                 "adaptive-dual-metric-no-rerank",
             }
@@ -3173,23 +3173,23 @@ def run_scale(
             metric_backend=metric_backend,
             diagnostic_state=diagnostic_state,
             query_metric_codes=query_metric_codes,
-            query_metric_hash_codes=query_metric_hash_codes,
-            global_hash_rerank_mode=getattr(args, "global_hash_rerank_mode", "full"),
+            query_metric_binary_codes=query_metric_binary_codes,
+            code_scan_rerank_mode=getattr(args, "code_scan_rerank_mode", "full"),
         )
         method_result["rerank_metric"] = (
             rerank_metric
             if method in {
-                "adaptive-topo-hash",
+                "adaptive-selection",
                 "adaptive-dual-metric",
                 "adaptive-dual-metric-no-rerank",
             }
             else None
         )
-        if method == "global-hash":
-            method_result["hash_rerank_mode"] = getattr(
-                args, "global_hash_rerank_mode", "full"
+        if method == "code-scan":
+            method_result["code_rerank_mode"] = getattr(
+                args, "code_scan_rerank_mode", "full"
             )
-            if method_result["hash_rerank_mode"] == "tp":
+            if method_result["code_rerank_mode"] == "tp":
                 method_result["rerank_metric"] = "TP"
         results.append(method_result)
         predictions_by_method[method] = predictions
@@ -3261,7 +3261,7 @@ def run_scale(
                 diagnostic_states[method], tp_ids
             )
     payload = {
-        "protocol": "topology_aware_multi_resolution_path_hash",
+        "protocol": "hierarchy_aware_candidate_selection",
         "gallery_size": int(gallery_size),
         "queries": int(len(query_embeddings)),
         "gallery_selection": args.gallery_selection,
@@ -3354,7 +3354,7 @@ def run_scale(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate TopoRouteHash: L3/L2 postings, L1 path MinHash, Global Hash "
+            "Evaluate candidate selection: L3/L2 postings, L1 path MinHash, Code-Scan "
             "fallback, and structure-aware rank fusion. Optional continuous "
             "multi-scale reranking uses precomputed scale_embeddings."
         )
@@ -3370,9 +3370,9 @@ def parse_args(argv=None):
     exclusion.add_argument("--exclude-self", dest="exclude_self", action="store_true")
     exclusion.add_argument("--no-exclude-self", dest="exclude_self", action="store_false")
     parser.set_defaults(exclude_self=None)
-    parser.add_argument("--hash-model-file", required=True)
+    parser.add_argument("--code-model-file", required=True)
     parser.add_argument(
-        "--metric-hash-model-file",
+        "--metric-code-model-file",
         default=None,
         help="Independent metric-head checkpoint used by adaptive-dual-metric.",
     )
@@ -3399,15 +3399,15 @@ def parse_args(argv=None):
     parser.add_argument("--positives-per-query", type=int, default=1)
     parser.add_argument("--selection-seed", type=int, default=2026)
     parser.add_argument(
-        "--methods", default="topo-route-hash,global-hash,exact"
+        "--methods", default="hierarchical-route,code-scan,exact"
     )
     parser.add_argument(
         "--candidate-source",
         choices=["hybrid", "global-only"],
         default="hybrid",
         help=(
-            "Candidate generation for topo-route-hash. 'global-only' skips "
-            "L3/L2 posting retrieval and only reranks Global Hash candidates."
+            "Candidate generation for hierarchical-route. 'global-only' skips "
+            "L3/L2 posting retrieval and only reranks Code-Scan candidates."
         ),
     )
     parser.add_argument("--top-k", type=int, default=50)
@@ -3420,7 +3420,7 @@ def parse_args(argv=None):
         choices=["embedding", "TP", "DITA", "discret_frechet", "LCRS", "NetERP"],
         default="embedding",
         help=(
-            "Final metric for adaptive reranking, or TP for Global Hash tp mode. "
+            "Final metric for adaptive reranking, or TP for Code-Scan tp mode. "
             "The selected metric is computed online and included in query latency."
         ),
     )
@@ -3428,28 +3428,28 @@ def parse_args(argv=None):
     parser.add_argument("--probe-radius", type=int, choices=[0, 1, 2], default=1)
     parser.add_argument("--hamming-candidates", type=int, default=1024)
     parser.add_argument(
-        "--hash-backend", choices=["mih", "hnsw", "flat"], default="mih",
-        help="Hash retrieval: MIH probing, Hamming HNSW, or exact packed XOR/popcount scan.",
+        "--code-backend", choices=["mih", "hnsw", "flat"], default="mih",
+        help="Code retrieval: MIH probing, Hamming HNSW, or exact packed XOR/popcount scan.",
     )
     parser.add_argument(
-        "--global-hash-rerank-mode",
-        choices=["full", "hash-only", "tp"],
+        "--code-scan-rerank-mode",
+        choices=["full", "code-only", "tp"],
         default="full",
         help=(
-            "Rank Global Hash results by continuous embedding distance ('full') "
-            "or return Hamming results directly ('hash-only'), or rerank every "
+            "Rank Code-Scan results by continuous embedding distance ('full') "
+            "or return Hamming results directly ('code-only'), or rerank every "
             "query's Hamming pool by online TP ('tp', requires --rerank-metric TP)."
         ),
     )
-    parser.add_argument("--hash-flat-block-size", type=int, default=65536)
-    parser.add_argument("--hash-hnsw-m", type=int, default=16)
-    parser.add_argument("--hash-hnsw-ef-construction", type=int, default=200)
-    parser.add_argument("--hash-hnsw-ef-search", type=int, default=256)
+    parser.add_argument("--code-flat-block-size", type=int, default=65536)
+    parser.add_argument("--code-hnsw-m", type=int, default=16)
+    parser.add_argument("--code-hnsw-ef-construction", type=int, default=200)
+    parser.add_argument("--code-hnsw-ef-search", type=int, default=256)
     parser.add_argument(
         "--embedding-storage", choices=["float16", "float32"], default="float16"
     )
     parser.add_argument("--encode-batch-size", type=int, default=4096)
-    parser.add_argument("--hash-device", default="auto")
+    parser.add_argument("--code-device", default="auto")
     parser.add_argument("--query-code-device", default="cpu")
     parser.add_argument("--edge-file", default=None)
     parser.add_argument("--node-count", type=int, default=0)
@@ -3482,7 +3482,7 @@ def parse_args(argv=None):
         choices=["skip", "metric"],
         default="skip",
         help=(
-            "For adaptive-topo-hash, skip metric reranking on the confident "
+            "For adaptive-selection, skip metric reranking on the confident "
             "Global path or run the configured metric there as well."
         ),
     )
@@ -3500,7 +3500,7 @@ def parse_args(argv=None):
         "--adaptive-preserve-global-top50",
         action="store_true",
         help=(
-            "Protect the Global Hash embedding Top-50 inside Adaptive metric rerank "
+            "Protect the Code-Scan embedding Top-50 inside Adaptive metric rerank "
             "pools. With adaptive-metric-fast-path=skip, only difficult "
             "queries use the configured metric pool. Requires a non-embedding "
             "--rerank-metric."
@@ -3513,9 +3513,9 @@ def parse_args(argv=None):
     parser.add_argument("--metric-prefilter-global-protect", type=int, default=32)
     parser.add_argument("--metric-prefilter-structural-protect", type=int, default=16)
     parser.add_argument("--metric-prefilter-embedding-weight", type=float, default=1.0)
-    parser.add_argument("--metric-prefilter-hash-weight", type=float, default=0.0)
+    parser.add_argument("--metric-prefilter-code-weight", type=float, default=0.0)
     parser.add_argument(
-        "--metric-prefilter-hash-score", choices=["hamming", "soft"], default="hamming"
+        "--metric-prefilter-code-score", choices=["hamming", "soft"], default="hamming"
     )
     parser.add_argument("--metric-prefilter-soft-temperature", type=float, default=1.0)
     parser.add_argument("--dual-metric-search-candidates", type=int, default=256)
@@ -3527,7 +3527,7 @@ def parse_args(argv=None):
     parser.add_argument("--dual-metric-head-protect", type=int, default=48)
     parser.add_argument("--dual-metric-structural-protect", type=int, default=16)
     parser.add_argument("--dual-metric-embedding-weight", type=float, default=0.40)
-    parser.add_argument("--dual-metric-hash-weight", type=float, default=0.40)
+    parser.add_argument("--dual-metric-code-weight", type=float, default=0.40)
     parser.add_argument("--dual-metric-topology-weight", type=float, default=0.20)
     parser.add_argument("--l3-weight", type=float, default=0.45)
     parser.add_argument("--l2-weight", type=float, default=0.35)
@@ -3572,7 +3572,7 @@ def main():
     if not methods or unknown:
         raise ValueError(f"Unknown methods: {unknown}; expected a subset of {METHODS}.")
     adaptive_methods = {
-        "adaptive-topo-hash",
+        "adaptive-selection",
         "adaptive-dual-metric",
         "adaptive-dual-metric-no-rerank",
     }
@@ -3580,21 +3580,21 @@ def main():
         "adaptive-dual-metric",
         "adaptive-dual-metric-no-rerank",
     }
-    global_tp = args.global_hash_rerank_mode == "tp"
-    if global_tp and ("global-hash" not in methods or args.rerank_metric != "TP"):
+    global_tp = args.code_scan_rerank_mode == "tp"
+    if global_tp and ("code-scan" not in methods or args.rerank_metric != "TP"):
         raise ValueError(
-            "--global-hash-rerank-mode tp requires --methods global-hash "
+            "--code-scan-rerank-mode tp requires --methods code-scan "
             "(or a method list containing it) and --rerank-metric TP."
         )
     if (args.rerank_metric != "embedding"
             and not adaptive_methods.intersection(methods) and not global_tp):
         raise ValueError(
             "Online metric reranking requires an adaptive method or "
-            "--global-hash-rerank-mode tp with --rerank-metric TP."
+            "--code-scan-rerank-mode tp with --rerank-metric TP."
         )
-    if dual_metric_methods.intersection(methods) and not args.metric_hash_model_file:
+    if dual_metric_methods.intersection(methods) and not args.metric_code_model_file:
         raise ValueError(
-            "adaptive-dual-metric requires --metric-hash-model-file."
+            "adaptive-dual-metric requires --metric-code-model-file."
         )
     if args.dual_metric_weight_file and not dual_metric_methods.intersection(methods):
         raise ValueError(
@@ -3622,14 +3622,14 @@ def main():
             )
     if args.top_k <= 0:
         raise ValueError("top_k must be positive.")
-    if "topo-route-hash" in methods and args.top_k > args.global_candidates:
-        raise ValueError("top_k cannot exceed global_candidates for topo-route-hash.")
+    if "hierarchical-route" in methods and args.top_k > args.global_candidates:
+        raise ValueError("top_k cannot exceed global_candidates for hierarchical-route.")
     if adaptive_methods.intersection(methods) and args.top_k > args.adaptive_max_global:
         raise ValueError(
             "top_k cannot exceed adaptive_max_global for adaptive methods."
         )
-    if "global-hash" in methods and args.top_k > args.hamming_candidates:
-        raise ValueError("top_k cannot exceed hamming_candidates for global-hash.")
+    if "code-scan" in methods and args.top_k > args.hamming_candidates:
+        raise ValueError("top_k cannot exceed hamming_candidates for code-scan.")
     gallery = load_embedding_payload(
         args.gallery_file, args.gallery_source_ids, role="gallery"
     )
@@ -3700,7 +3700,7 @@ def main():
         metric_backend = _build_metric_backend(args)
         if global_tp:
             print(
-                "[global-hash] online TP rerank on every query, candidates=%d, "
+                "[code-scan] online TP rerank on every query, candidates=%d, "
                 "top_k=%d, gated=false, threads=%d"
                 % (args.hamming_candidates, args.top_k, args.tp_num_threads)
             )
@@ -3731,7 +3731,7 @@ def main():
         if metric_backend is not None:
             metric_backend.close()
     summary = {
-        "protocol": "topology_aware_multi_resolution_path_hash_sweep",
+        "protocol": "hierarchy_aware_candidate_selection_sweep",
         "gallery_sizes": sizes,
         "rerank_metric": args.rerank_metric,
         "results": results,

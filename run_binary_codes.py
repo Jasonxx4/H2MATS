@@ -18,16 +18,16 @@ from ann_pipeline import (
     resolve_checkpoint,
     setup_logging,
 )
-from hash_global import (
-    HashGlobalConfig,
-    HashGlobalIndex,
-    HashHeadConfig,
-    HashTrainConfig,
-    load_hash_head,
-    save_hash_head,
-    train_hash_head,
+from binary_codes import (
+    BinaryCodeIndexConfig,
+    BinaryCodeIndex,
+    CodeEncoderConfig,
+    CodeTrainConfig,
+    load_code_encoder,
+    save_code_encoder,
+    train_code_encoder,
 )
-from hash_global_pipeline import (
+from binary_code_pipeline import (
     _load_npz_payload,
     eval_command,
     load_metric_candidate_teacher,
@@ -86,16 +86,16 @@ def _export_embeddings(config, checkpoint, eval_file, output_file, batch_size, f
     )
 
 
-def _train_head(args, validation_embedding_file, model_file, hash_device, force):
+def _train_head(args, validation_embedding_file, model_file, code_device, force):
     model_inputs = [validation_embedding_file]
     if args.metric_candidate_teacher_file:
         model_inputs.append(args.metric_candidate_teacher_file)
     if args.metric_distance_file:
         model_inputs.append(args.metric_distance_file)
     if not _needs_refresh(model_file, model_inputs, force=force):
-        print(f"[reuse] hash head: {model_file}")
-        return load_hash_head(model_file)[1]
-    print(f"[train] hash head: {model_file}")
+        print(f"[reuse] code encoder: {model_file}")
+        return load_code_encoder(model_file)[1]
+    print(f"[train] code encoder: {model_file}")
     payload = _load_npz_payload(validation_embedding_file, require_labels=True)
     if getattr(args, "ignore_embedded_metric_distances", False):
         payload.pop("metric_distances", None)
@@ -112,16 +112,16 @@ def _train_head(args, validation_embedding_file, model_file, hash_device, force)
         payload["metric_distance_key"] = "candidate_teacher_tp_distances"
     elif args.metric_distance_file:
         payload["metric_distances"] = load_metric_distances(args.metric_distance_file)
-    head_config = HashHeadConfig(
+    head_config = CodeEncoderConfig(
         input_dim=payload["embeddings"].shape[1],
         bits=args.bits,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
     )
-    train_config = HashTrainConfig(
+    train_config = CodeTrainConfig(
         metric=args.metric,
         epochs=args.epochs,
-        batch_size=args.hash_batch_size,
+        batch_size=args.code_batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         positive_pool=args.positive_pool,
@@ -154,9 +154,9 @@ def _train_head(args, validation_embedding_file, model_file, hash_device, force)
         temperature_end=args.temperature_end,
         validation_fraction=args.validation_fraction,
         seed=args.seed,
-        device=hash_device,
+        device=code_device,
     )
-    head, report = train_hash_head(
+    head, report = train_code_encoder(
         payload["embeddings"],
         payload["labels"],
         head_config,
@@ -175,16 +175,16 @@ def _train_head(args, validation_embedding_file, model_file, hash_device, force)
         report["metric_distance_key"] = payload["metric_distance_key"]
     elif args.metric_distance_file:
         report["metric_distance_file"] = str(Path(args.metric_distance_file).resolve())
-    save_hash_head(head, model_file, metadata=report)
+    save_code_encoder(head, model_file, metadata=report)
     _write_json(model_file + ".json", report)
     return report
 
 
-def _build_index(args, test_embedding_file, model_file, index_dir, hash_device, force):
-    config_file = osp.join(index_dir, "hash_config.json")
+def _build_index(args, test_embedding_file, model_file, index_dir, code_device, force):
+    config_file = osp.join(index_dir, "code_config.json")
     required_files = [
         config_file,
-        osp.join(index_dir, "hash_head.pt"),
+        osp.join(index_dir, "code_encoder.pt"),
         osp.join(index_dir, "codes.npy"),
         osp.join(index_dir, "embeddings.npy"),
         osp.join(index_dir, "table_offsets.npy"),
@@ -192,12 +192,12 @@ def _build_index(args, test_embedding_file, model_file, index_dir, hash_device, 
     ]
     force = force or not all(osp.isfile(path) for path in required_files)
     if not _needs_refresh(config_file, [test_embedding_file, model_file], force=force):
-        print(f"[reuse] hash-global index: {index_dir}")
+        print(f"[reuse] code-scan index: {index_dir}")
         return
-    print(f"[build] hash-global index: {index_dir}")
+    print(f"[build] code-scan index: {index_dir}")
     payload = _load_npz_payload(test_embedding_file)
-    head, head_metadata = load_hash_head(model_file)
-    index_config = HashGlobalConfig(
+    head, head_metadata = load_code_encoder(model_file)
+    index_config = BinaryCodeIndexConfig(
         bits=head.config.bits,
         subcode_bits=16,
         probe_radius=args.probe_radius,
@@ -209,19 +209,19 @@ def _build_index(args, test_embedding_file, model_file, index_dir, hash_device, 
     )
     metadata = {
         "source_embedding_file": str(Path(test_embedding_file).resolve()),
-        "source_hash_model": str(Path(model_file).resolve()),
-        "hash_training": head_metadata,
+        "source_code_model": str(Path(model_file).resolve()),
+        "code_training": head_metadata,
     }
-    index = HashGlobalIndex(index_config).build(
+    index = BinaryCodeIndex(index_config).build(
         payload["embeddings"],
         head,
-        encode_device=hash_device,
+        encode_device=code_device,
         metadata=metadata,
     )
     index.save(index_dir)
 
 
-def _evaluate_all(args, test_embedding_file, index_dir, result_file, hash_device):
+def _evaluate_all(args, test_embedding_file, index_dir, result_file, code_device):
     print(f"[eval] all test queries -> {result_file}")
     eval_args = SimpleNamespace(
         embedding_file=test_embedding_file,
@@ -232,7 +232,7 @@ def _evaluate_all(args, test_embedding_file, index_dir, result_file, hash_device
         top_k=args.top_k,
         truth_k=args.truth_k,
         result_file=result_file,
-        query_code_device=hash_device,
+        query_code_device=code_device,
         rerank_mode=args.rerank_mode,
         small_rerank_candidates=args.small_rerank_candidates,
     )
@@ -247,7 +247,7 @@ def run(args):
         "ann_artifacts",
         config.dataset,
         config.distance_type,
-        "hash_global",
+        "binary_codes",
     )
     os.makedirs(output_dir, exist_ok=True)
 
@@ -255,22 +255,22 @@ def run(args):
     test_file = args.test_file or config.spatial_test_set
     validation_embedding_file = osp.join(output_dir, "validation_embeddings.npz")
     test_embedding_file = osp.join(output_dir, "test_embeddings.npz")
-    if args.dual_hash_heads:
-        model_file = osp.join(output_dir, f"hash_head_{args.bits}_metric.pt")
+    if args.dual_code_encoders:
+        model_file = osp.join(output_dir, f"code_encoder_{args.bits}_metric.pt")
         candidate_model_file = osp.join(
-            output_dir, f"hash_head_{args.bits}_candidate.pt"
+            output_dir, f"code_encoder_{args.bits}_base.pt"
         )
     else:
-        model_file = osp.join(output_dir, f"hash_head_{args.bits}.pt")
+        model_file = osp.join(output_dir, f"code_encoder_{args.bits}.pt")
         candidate_model_file = model_file
     index_dir = osp.join(output_dir, f"index_{args.bits}")
     result_file = args.result_file or osp.join(output_dir, f"result_all_{args.bits}.json")
     force_export = args.force_all or args.force_export
     force_train = args.force_all or args.force_train
     force_build = args.force_all or args.force_build
-    hash_device = args.hash_device
-    if hash_device is None:
-        hash_device = f"cuda:{config.cuda}" if torch.cuda.is_available() else "cpu"
+    code_device = args.code_device
+    if code_device is None:
+        code_device = f"cuda:{config.cuda}" if torch.cuda.is_available() else "cpu"
 
     if _is_embedding_file(validation_file):
         validation_embedding_file = validation_file
@@ -296,11 +296,11 @@ def run(args):
         args,
         validation_embedding_file,
         model_file,
-        hash_device,
+        code_device,
         force_train,
     )
     candidate_training_report = None
-    if args.dual_hash_heads:
+    if args.dual_code_encoders:
         candidate_args = copy(args)
         candidate_args.ignore_embedded_metric_distances = True
         candidate_args.metric_distance_file = None
@@ -316,14 +316,14 @@ def run(args):
             args.candidate_in_batch_negative_weight
         )
         print(
-            "[train] candidate head uses embedding supervision only; "
-            "TP distillation remains isolated in the metric head"
+            "[train] base encoder uses embedding supervision only; "
+            "TP distillation remains isolated in the metric encoder"
         )
         candidate_training_report = _train_head(
             candidate_args,
             validation_embedding_file,
             candidate_model_file,
-            hash_device,
+            code_device,
             force_train,
         )
     _build_index(
@@ -331,14 +331,14 @@ def run(args):
         test_embedding_file,
         candidate_model_file,
         index_dir,
-        hash_device,
+        code_device,
         force_build,
     )
     result = None
     if args.skip_eval:
-        print("[skip] hash-global evaluation")
+        print("[skip] code-scan evaluation")
     else:
-        result = _evaluate_all(args, test_embedding_file, index_dir, result_file, hash_device)
+        result = _evaluate_all(args, test_embedding_file, index_dir, result_file, code_device)
 
     manifest = {
         "dataset": config.dataset,
@@ -349,10 +349,10 @@ def run(args):
         "test_file": str(Path(test_file).resolve()),
         "validation_embedding_file": str(Path(validation_embedding_file).resolve()),
         "test_embedding_file": str(Path(test_embedding_file).resolve()),
-        "hash_model_file": str(Path(candidate_model_file).resolve()),
-        "candidate_hash_model_file": str(Path(candidate_model_file).resolve()),
-        "metric_prefilter_hash_model_file": (
-            str(Path(model_file).resolve()) if args.dual_hash_heads else None
+        "code_model_file": str(Path(candidate_model_file).resolve()),
+        "base_code_model_file": str(Path(candidate_model_file).resolve()),
+        "metric_prefilter_code_model_file": (
+            str(Path(model_file).resolve()) if args.dual_code_encoders else None
         ),
         "index_dir": str(Path(index_dir).resolve()),
         "result_file": str(Path(result_file).resolve()),
@@ -367,7 +367,7 @@ def run(args):
             "coord_fusion": config.gtraj.get("coordFusion"),
             "cuda": config.cuda,
         },
-        "hash_config": asdict(HashGlobalConfig(
+        "code_config": asdict(BinaryCodeIndexConfig(
             bits=args.bits,
             probe_radius=args.probe_radius,
             hamming_candidates=args.hamming_candidates,
@@ -376,8 +376,8 @@ def run(args):
             embedding_storage=args.embedding_storage,
             encode_batch_size=args.encode_batch_size,
         )),
-        "hash_training_best_validation_loss": training_report.get("best_validation_loss"),
-        "candidate_hash_training_best_validation_loss": (
+        "code_training_best_validation_loss": training_report.get("best_validation_loss"),
+        "base_code_training_best_validation_loss": (
             candidate_training_report.get("best_validation_loss")
             if candidate_training_report is not None else None
         ),
@@ -396,7 +396,7 @@ def run(args):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Export embeddings, train a post-hoc hash head, build hash-global, "
+            "Export embeddings, train a post-hoc code encoder, build code-scan, "
             "and query every test trajectory."
         )
     )
@@ -424,11 +424,11 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--dual-hash-heads",
+        "--dual-code-encoders",
         action="store_true",
         help=(
-            "Train separate candidate and TP-metric hash heads. The candidate "
-            "head builds Global MIH; the metric head is reserved for prefiltering."
+            "Train separate base and TP-metric code encoders. The base "
+            "encoder builds the code-scan index; the metric encoder is reserved for prefiltering."
         ),
     )
 
@@ -476,7 +476,7 @@ def parse_args():
     parser.add_argument("--metric", choices=["l2", "cosine"], default="l2")
     parser.add_argument("--normalize", action="store_true")
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--hash-batch-size", type=int, default=512)
+    parser.add_argument("--code-batch-size", type=int, default=512)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--positive-pool", type=int, default=10)
@@ -517,7 +517,7 @@ def parse_args():
     parser.add_argument("--temperature-end", type=float, default=0.1)
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--hash-device", default=None)
+    parser.add_argument("--code-device", default=None)
 
     parser.add_argument("--probe-radius", type=int, choices=[0, 1, 2], default=1)
     parser.add_argument("--hamming-candidates", type=int, default=2000)
@@ -527,11 +527,11 @@ def parse_args():
     parser.add_argument("--truth-k", type=int, default=50)
     parser.add_argument(
         "--rerank-mode",
-        choices=["full", "hash-only", "small-rerank"],
+        choices=["full", "code-only", "small-rerank"],
         default="full",
         help=(
             "Final ranking mode: full keeps the original continuous rerank, "
-            "hash-only returns Hamming-ranked results, small-rerank reranks only "
+            "code-only returns Hamming-ranked results, small-rerank reranks only "
             "a reduced Hamming candidate set."
         ),
     )
@@ -550,7 +550,7 @@ def parse_args():
     parser.add_argument(
         "--skip-eval",
         action="store_true",
-        help="Only export embeddings, train the hash head, and build the index.",
+        help="Only export embeddings, train the code encoder, and build the index.",
     )
     parser.add_argument("--no-mmap", action="store_true")
     parser.add_argument("--force-export", action="store_true")

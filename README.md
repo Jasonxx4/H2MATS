@@ -7,7 +7,7 @@ H²MATS learns trajectory embeddings that approximate a road-network trajectory 
 - **Road hierarchy.** Road nodes (L0) are grouped into neighborhoods (L1), districts (L2), and macro-regions (L3) by weighted Louvain partitioning with refinement.
 - **Hybrid-geometry graph encoder.** A Euclidean branch models the semantics within each level and a hyperbolic (Poincaré ball) branch models the containment between levels.
 - **Hierarchy-aligned multi-scale trajectory encoder (HMT).** A trajectory is encoded at each hierarchy level, with segments split at region boundaries.
-- **Adaptive candidate selection.** A 128-bit base code scan answers most queries. Queries with a small normalized Hamming margin are augmented with candidates from a metric hash head and from L2/L3 region-transition postings, and their candidates are reranked by the exact distance under a query budget.
+- **Adaptive candidate selection.** A 128-bit base code scan answers most queries. Queries with a small normalized Hamming margin are augmented with candidates from the metric encoding network and from L2/L3 region-transition postings, and their candidates are reranked by the exact distance under a query budget.
 
 ## Repository layout
 
@@ -17,15 +17,15 @@ H²MATS learns trajectory embeddings that approximate a road-network trajectory 
 | Preprocessing | `spatial_preprocess.py`, `spatial_similarity_computation.py`, `generate_trajectory.py`, `generate_louvain_hierarchy.py`, `generate_node_knn.py`, `STmatching_distribution_ver.py`, `Model.py` |
 | Encoder | `hybrid_geo_network.py`, `hyperbolic_utils.py`, `graph_normalization.py`, `sequence_encoders.py`, `model_network.py`, `spatial_data_utils.py` |
 | Training and evaluation | `main.py`, `Trainer.py`, `lossfun.py`, `test_method.py`, `eval_spatial_model.py` |
-| Hash heads | `hash_global.py`, `hash_global_pipeline.py`, `run_hash_global_all.py`, `trajectory_embedding.py`, `build_head_training_set.py`, `build_large_scale_head_training.py`, `build_validation_metric_distances.py`, `build_validation_union_tp_teacher.py` |
-| Candidate selection | `run_adaptive_topo_hash_checkpoint.py`, `topo_route_hash_large_scale.py`, `dual_metric_fusion.py`, `hier_hash_large_scale.py`, `hier_hash_fusion.py`, `trajectory_metric_backend.py`, `tp_retrieval_evaluation.py`, `ann_index.py`, `ann_pipeline.py`, `paired_retrieval_experiment.py` |
+| Binary encoding networks | `binary_codes.py`, `binary_code_pipeline.py`, `run_binary_codes.py`, `trajectory_embedding.py`, `build_head_training_set.py`, `build_large_scale_head_training.py`, `build_validation_metric_distances.py`, `build_validation_union_tp_teacher.py` |
+| Candidate selection | `run_candidate_selection.py`, `candidate_selection.py`, `dual_metric_fusion.py`, `hierarchical_code_large_scale.py`, `hierarchical_code_fusion.py`, `trajectory_metric_backend.py`, `tp_retrieval_evaluation.py`, `ann_index.py`, `ann_pipeline.py`, `paired_retrieval_experiment.py` |
 | Large-scale benchmark | `build_augmented_tp_benchmark.py`, `restore_benchmark_coordinates.py`, `reencode_embedding_payload.py`, `run_augmented_tp_experiment.py`, `hnsw_large_scale.py` |
 | Experiment scripts | `scripts/*.sh` |
 | Unit tests | `tests/` |
 
 ## Requirements
 
-Python 3.9 or later and a CUDA GPU are recommended.
+Python 3.10 or later is required, and a CUDA GPU is recommended.
 
 ```bash
 pip install -r requirements.txt
@@ -98,11 +98,11 @@ H2MATS_DATASET=porto H2MATS_DISTANCE_TYPE=TP \
   bash scripts/run_candidate_selection.sh saved_models/porto/TP_<timestamp>/epoch_49.pt
 ```
 
-The first run exports the embeddings and trains the base and metric hash heads into `<output-dir>/hash_assets`. Later runs reuse them unless `--retrain-hash` is passed. The script evaluates three methods.
+The first run exports the embeddings and trains the base and metric encoding networks into `<output-dir>/code_assets`. Later runs reuse them unless `--retrain-codes` is passed. The script evaluates three methods.
 
 | Method name in the code | Method in the paper |
 | --- | --- |
-| `global-hash` | Code-Scan |
+| `code-scan` | Code-Scan |
 | `adaptive-dual-metric-no-rerank` | Code-Scan+Dual |
 | `adaptive-dual-metric` | H²MATS |
 
@@ -128,7 +128,7 @@ bash scripts/run_large_scale_hnsw.sh       # Ours-HNSW
 bash scripts/run_large_scale_emb_hnsw.sh   # Emb-HNSW baseline
 ```
 
-All scripts read their paths and devices from environment variables such as `H2MATS_DATASET`, `H2MATS_DISTANCE_TYPE`, `H2MATS_BENCHMARK_DIR`, `H2MATS_GALLERY_FILE`, `H2MATS_QUERY_FILE`, `H2MATS_HASH_ASSETS_DIR`, `H2MATS_HASH_CUDA`, and `H2MATS_MODEL_CUDA`. Set `H2MATS_DRY_RUN=1` to print a command without running it. The exact distance table for 2,000 queries over one million trajectories takes about 8 GB of disk space and is cached after the first run.
+All scripts read their paths and devices from environment variables such as `H2MATS_DATASET`, `H2MATS_DISTANCE_TYPE`, `H2MATS_BENCHMARK_DIR`, `H2MATS_GALLERY_FILE`, `H2MATS_QUERY_FILE`, `H2MATS_CODE_ASSETS_DIR`, `H2MATS_CODE_CUDA`, and `H2MATS_MODEL_CUDA`. Set `H2MATS_DRY_RUN=1` to print a command without running it. The exact distance table for 2,000 queries over one million trajectories takes about 8 GB of disk space and is cached after the first run.
 
 ## Tests
 

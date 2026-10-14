@@ -1,7 +1,7 @@
 """Run the complete augmented Beijing TP embedding and ANN experiment.
 
 This orchestrator intentionally keeps TP ground truth out of model training:
-the TP table is passed only to the final TopologyHash/HNSW evaluation commands.
+the TP table is passed only to the final candidate-selection/HNSW evaluation commands.
 Gallery and Query embeddings are exported in the exact order used to construct
 that table, and Query exports reuse the Gallery coordinate normalization stats.
 """
@@ -187,25 +187,25 @@ def _attach_metadata(args, embedding_file, metadata_file, output_file):
     ]
 
 
-def _topology_command(args, gallery, query, hash_model, output_dir):
+def _topology_command(args, gallery, query, code_model, output_dir):
     _apply_dataset_defaults(args)
     table = _resolve(args.tp_distance_table_file)
     methods = [args.topology_method]
     if args.topology_method == "adaptive-dual-metric":
-        # Keep the fused-hash candidate list as an ablation next to the
+        # Keep the fused-code candidate list as an ablation next to the
         # trajectory-metric reranked result.
         methods.append("adaptive-dual-metric-no-rerank")
-    if args.include_global_hash:
-        methods.append("global-hash")
+    if args.include_code_scan:
+        methods.append("code-scan")
     command = [
         _python(),
-        "topo_route_hash_large_scale.py",
+        "candidate_selection.py",
         "--gallery-file",
         str(gallery),
         "--query-file",
         str(query),
-        "--hash-model-file",
-        str(hash_model),
+        "--code-model-file",
+        str(code_model),
         "--hierarchy-dir",
         str(_resolve(args.hierarchy_dir)),
         "--output-dir",
@@ -230,10 +230,10 @@ def _topology_command(args, gallery, query, hash_model, output_dir):
         str(args.probe_radius),
         "--hamming-candidates",
         str(args.hamming_candidates),
-        "--hash-backend",
-        args.hash_backend,
-        "--hash-flat-block-size",
-        str(args.hash_flat_block_size),
+        "--code-backend",
+        args.code_backend,
+        "--code-flat-block-size",
+        str(args.code_flat_block_size),
         "--structural-candidates",
         str(args.structural_candidates),
         "--global-candidates",
@@ -286,20 +286,20 @@ def _topology_command(args, gallery, query, hash_model, output_dir):
         "--metric-prefilter-global-protect": args.metric_prefilter_global_protect,
         "--metric-prefilter-structural-protect": args.metric_prefilter_structural_protect,
         "--metric-prefilter-embedding-weight": args.metric_prefilter_embedding_weight,
-        "--metric-prefilter-hash-weight": args.metric_prefilter_hash_weight,
-        "--metric-prefilter-hash-score": args.metric_prefilter_hash_score,
+        "--metric-prefilter-code-weight": args.metric_prefilter_code_weight,
+        "--metric-prefilter-code-score": args.metric_prefilter_code_score,
         "--metric-prefilter-soft-temperature": args.metric_prefilter_soft_temperature,
     }
     for flag, value in adaptive_options.items():
         command.extend([flag, str(value)])
     if args.adaptive_preserve_global_top50:
         command.append("--adaptive-preserve-global-top50")
-    if args.topology_method == "adaptive-topo-hash":
+    if args.topology_method == "adaptive-selection":
         command.extend(["--embedding-weight", str(args.topology_embedding_weight)])
-    if args.metric_hash_model_file:
+    if args.metric_code_model_file:
         command.extend([
-            "--metric-hash-model-file",
-            str(_resolve(args.metric_hash_model_file)),
+            "--metric-code-model-file",
+            str(_resolve(args.metric_code_model_file)),
         ])
     if args.dual_metric_weight_file:
         command.extend([
@@ -319,14 +319,14 @@ def _topology_command(args, gallery, query, hash_model, output_dir):
             "--dual-metric-head-protect": args.dual_metric_head_protect,
             "--dual-metric-structural-protect": args.dual_metric_structural_protect,
             "--dual-metric-embedding-weight": args.dual_metric_embedding_weight,
-            "--dual-metric-hash-weight": args.dual_metric_hash_weight,
+            "--dual-metric-code-weight": args.dual_metric_code_weight,
             "--dual-metric-topology-weight": args.dual_metric_topology_weight,
         }
         for flag, value in dual_metric_options.items():
             command.extend([flag, str(value)])
     command.extend([
-        "--hash-device",
-        str(args.hash_device),
+        "--code-device",
+        str(args.code_device),
         "--query-code-device",
         str(args.topology_query_code_device),
     ])
@@ -392,11 +392,11 @@ def run(args):
     _apply_dataset_defaults(args)
     if args.adaptive_preserve_global_top50:
         if args.topology_method not in {
-            "adaptive-topo-hash", "adaptive-dual-metric"
+            "adaptive-selection", "adaptive-dual-metric"
         }:
             raise ValueError(
                 "--adaptive-preserve-global-top50 requires "
-                "an adaptive TopoHash method."
+                "an adaptive candidate selection method."
             )
         if args.rerank_metric == "embedding":
             raise ValueError(
@@ -420,22 +420,22 @@ def run(args):
                 "Global Top-50 protection requires the Global, metric-rerank, "
                 "and adaptive budgets to be at least 50."
             )
-    metric_hash_model_path = None
+    metric_code_model_path = None
     if args.topology_method == "adaptive-dual-metric":
         if args.rerank_metric == "embedding":
             raise ValueError(
                 "--topology-method adaptive-dual-metric requires a trajectory "
                 "--rerank-metric."
             )
-        if not args.metric_hash_model_file:
+        if not args.metric_code_model_file:
             raise ValueError(
                 "--topology-method adaptive-dual-metric requires "
-                "--metric-hash-model-file."
+                "--metric-code-model-file."
             )
-        metric_hash_model_path = _resolve(args.metric_hash_model_file)
-        if not metric_hash_model_path.is_file():
+        metric_code_model_path = _resolve(args.metric_code_model_file)
+        if not metric_code_model_path.is_file():
             raise FileNotFoundError(
-                f"Metric Hash head does not exist: {metric_hash_model_path}"
+                f"Metric code encoder does not exist: {metric_code_model_path}"
             )
     model_path = _validate_checkpoint(args.model, "Our model")
     spgmt_model_path = (
@@ -473,7 +473,7 @@ def run(args):
     spgmt_query = output_dir / "spgmt_query_embeddings.npz"
     coordinate_stats = output_dir / "coordinate_stats.npy"
     validation_embeddings = output_dir / "validation_embeddings.npz"
-    hash_model = _resolve(args.hash_model_file) if args.hash_model_file else output_dir / f"hash_head_{args.hash_bits}.pt"
+    code_model = _resolve(args.code_model_file) if args.code_model_file else output_dir / f"code_encoder_{args.code_bits}.pt"
 
     commands = []
     if not args.skip_export:
@@ -537,33 +537,33 @@ def run(args):
                 ]
             )
 
-    if not args.skip_hash_training and not hash_model.exists():
+    if not args.skip_code_training and not code_model.exists():
         commands.append(_export_validation_command(args, model_path, validation_embeddings))
         commands.append(
             [
                 _python(),
-                "hash_global_pipeline.py",
+                "binary_code_pipeline.py",
                 "train",
                 "--embedding-file",
                 str(validation_embeddings),
                 "--model-file",
-                str(hash_model),
+                str(code_model),
                 "--bits",
-                str(args.hash_bits),
+                str(args.code_bits),
                 "--epochs",
-                str(args.hash_epochs),
+                str(args.code_epochs),
                 "--batch-size",
-                str(args.hash_batch_size),
+                str(args.code_batch_size),
                 "--device",
-                args.hash_device,
+                args.code_device,
             ]
         )
 
     if not args.skip_topology:
         topology_dir_names = {
-            "adaptive-topo-hash": "result_adaptive_topology_hash",
-            "adaptive-dual-metric": "result_adaptive_dual_topology_hash",
-            "topo-route-hash": "result_topology_hash",
+            "adaptive-selection": "result_adaptive_candidate_selection",
+            "adaptive-dual-metric": "result_adaptive_dual_candidate_selection",
+            "hierarchical-route": "result_hierarchical_route",
         }
         topology_output_dir = output_dir / topology_dir_names[args.topology_method]
         commands.append(
@@ -571,7 +571,7 @@ def run(args):
                 args,
                 our_gallery,
                 our_query,
-                hash_model,
+                code_model,
                 topology_output_dir,
             )
         )
@@ -595,10 +595,10 @@ def run(args):
         "output_dir": str(output_dir.resolve()),
         "model": str(model_path.resolve()),
         "spgmt_model": str(spgmt_model_path.resolve()) if spgmt_model_path else None,
-        "hash_model": str(hash_model.resolve()),
-        "metric_hash_model": (
-            str(metric_hash_model_path.resolve())
-            if metric_hash_model_path is not None
+        "code_model": str(code_model.resolve()),
+        "metric_code_model": (
+            str(metric_code_model_path.resolve())
+            if metric_code_model_path is not None
             else None
         ),
         "tp_distance_table": str(_resolve(args.tp_distance_table_file).resolve()),
@@ -614,8 +614,8 @@ def run(args):
             ["adaptive-dual-metric", "adaptive-dual-metric-no-rerank"]
             if args.topology_method == "adaptive-dual-metric"
             else [args.topology_method]
-        ) + (["global-hash"] if args.include_global_hash else []),
-        "include_global_hash": bool(args.include_global_hash),
+        ) + (["code-scan"] if args.include_code_scan else []),
+        "include_code_scan": bool(args.include_code_scan),
         "adaptive_preserve_global_top50": bool(
             args.adaptive_preserve_global_top50
         ),
@@ -637,12 +637,12 @@ def run(args):
             "head_protect": int(args.dual_metric_head_protect),
             "structural_protect": int(args.dual_metric_structural_protect),
             "embedding_weight": float(args.dual_metric_embedding_weight),
-            "hash_weight": float(args.dual_metric_hash_weight),
+            "code_weight": float(args.dual_metric_code_weight),
             "topology_weight": float(args.dual_metric_topology_weight),
         },
         "hnsw_num_threads": int(args.hnsw_num_threads),
-        "hash_backend": args.hash_backend,
-        "hash_flat_block_size": int(args.hash_flat_block_size),
+        "code_backend": args.code_backend,
+        "code_flat_block_size": int(args.code_flat_block_size),
         "adaptive_config": {
             "adaptive_initial_global": int(args.adaptive_initial_global),
             "adaptive_initial_structural": int(args.adaptive_initial_structural),
@@ -692,24 +692,24 @@ def make_parser():
     )
     parser.add_argument("--hierarchy-dir", default=None)
     parser.add_argument("--validation-file", default=None)
-    parser.add_argument("--hash-model-file", default=None)
+    parser.add_argument("--code-model-file", default=None)
     parser.add_argument(
-        "--metric-hash-model-file",
+        "--metric-code-model-file",
         default=None,
         help=(
             "Independent Metric-Head checkpoint for adaptive-dual-metric. "
-            "Pair this with --hash-model-file for the Candidate Head."
+            "Pair this with --code-model-file for the base encoder."
         ),
     )
     parser.add_argument("--dual-metric-weight-file", default=None)
-    parser.add_argument("--hash-bits", type=int, default=128)
-    parser.add_argument("--hash-epochs", type=int, default=30)
-    parser.add_argument("--hash-batch-size", type=int, default=512)
-    parser.add_argument("--hash-device", default="auto")
+    parser.add_argument("--code-bits", type=int, default=128)
+    parser.add_argument("--code-epochs", type=int, default=30)
+    parser.add_argument("--code-batch-size", type=int, default=512)
+    parser.add_argument("--code-device", default="auto")
     parser.add_argument(
         "--topology-query-code-device",
         default="cpu",
-        help="Device used to encode Query hash codes during TopoHash evaluation.",
+        help="Device used to encode Query binary codes during candidate selection evaluation.",
     )
     parser.add_argument("--cuda", default="0")
     parser.add_argument(
@@ -731,7 +731,7 @@ def make_parser():
         default="embedding",
         help=(
             "Online final rerank metric for low-confidence adaptive queries. "
-            "TP rerank time is included in TopoHash query latency."
+            "TP rerank time is included in candidate selection query latency."
         ),
     )
     parser.add_argument(
@@ -752,15 +752,15 @@ def make_parser():
     parser.add_argument(
         "--topology-method",
         choices=[
-            "adaptive-topo-hash",
+            "adaptive-selection",
             "adaptive-dual-metric",
-            "topo-route-hash",
+            "hierarchical-route",
         ],
-        default="adaptive-topo-hash",
+        default="adaptive-selection",
         help=(
-            "TopologyHash method used for our model. adaptive-dual-metric uses "
+            "Candidate-selection method used for our model. adaptive-dual-metric uses "
             "an independent Metric Head and adds a no-rerank ablation; "
-            "topo-route-hash selects the legacy fixed-budget method."
+            "hierarchical-route selects the legacy fixed-budget method."
         ),
     )
     parser.add_argument("--metric", choices=["l2", "cosine"], default="l2")
@@ -771,17 +771,17 @@ def make_parser():
     )
     parser.add_argument("--probe-radius", type=int, choices=[0, 1, 2], default=1)
     parser.add_argument("--hamming-candidates", type=int, default=2048)
-    parser.add_argument("--hash-backend", choices=["mih", "hnsw", "flat"], default="mih")
-    parser.add_argument("--hash-flat-block-size", type=int, default=65536)
+    parser.add_argument("--code-backend", choices=["mih", "hnsw", "flat"], default="mih")
+    parser.add_argument("--code-flat-block-size", type=int, default=65536)
     parser.add_argument("--structural-candidates", type=int, default=512)
     parser.add_argument("--global-candidates", type=int, default=1024)
     parser.add_argument("--max-rerank-candidates", type=int, default=1536)
     parser.add_argument("--min-route-candidates", type=int, default=1024)
     parser.add_argument("--max-route-candidates", type=int, default=4096)
     parser.add_argument(
-        "--include-global-hash",
+        "--include-code-scan",
         action="store_true",
-        help="Evaluate Global Hash in the same TopoHash process for comparison.",
+        help="Evaluate Code-Scan in the same candidate selection process for comparison.",
     )
     parser.add_argument("--hnsw-m", type=int, default=16)
     parser.add_argument("--hnsw-ef-construction", type=int, default=200)
@@ -827,7 +827,7 @@ def make_parser():
         "--adaptive-preserve-global-top50",
         action="store_true",
         help=(
-            "Protect the Global Hash embedding Top-50 in Adaptive metric rerank pools. "
+            "Protect the Code-Scan embedding Top-50 in Adaptive metric rerank pools. "
             "With adaptive-metric-fast-path=skip, only difficult "
             "queries use the configured metric; emit Top-50 retention diagnostics."
         ),
@@ -839,9 +839,9 @@ def make_parser():
     parser.add_argument("--metric-prefilter-global-protect", type=int, default=32)
     parser.add_argument("--metric-prefilter-structural-protect", type=int, default=16)
     parser.add_argument("--metric-prefilter-embedding-weight", type=float, default=1.0)
-    parser.add_argument("--metric-prefilter-hash-weight", type=float, default=0.0)
+    parser.add_argument("--metric-prefilter-code-weight", type=float, default=0.0)
     parser.add_argument(
-        "--metric-prefilter-hash-score",
+        "--metric-prefilter-code-score",
         choices=["hamming", "soft"],
         default="hamming",
     )
@@ -857,15 +857,15 @@ def make_parser():
     parser.add_argument("--dual-metric-head-protect", type=int, default=48)
     parser.add_argument("--dual-metric-structural-protect", type=int, default=16)
     parser.add_argument("--dual-metric-embedding-weight", type=float, default=0.96)
-    parser.add_argument("--dual-metric-hash-weight", type=float, default=0.02)
+    parser.add_argument("--dual-metric-code-weight", type=float, default=0.02)
     parser.add_argument("--dual-metric-topology-weight", type=float, default=0.02)
     parser.add_argument(
         "--topology-embedding-weight",
         type=float,
         default=1.0,
         help=(
-            "Adaptive TopoHash embedding-rank weight. With the default 1.0, "
-            "topology only rescues candidates and does not replace Global "
+            "Embedding-rank weight of adaptive candidate selection. With the default 1.0, "
+            "topology only rescues candidates and does not replace the code-scan "
             "embedding ranking."
         ),
     )
@@ -912,7 +912,7 @@ def make_parser():
     parser.add_argument("--spgmt-graph-encoder", default=None)
     parser.add_argument("--spgmt-coord-fusion", default=None)
     parser.add_argument("--skip-export", action="store_true")
-    parser.add_argument("--skip-hash-training", action="store_true")
+    parser.add_argument("--skip-code-training", action="store_true")
     parser.add_argument("--skip-topology", action="store_true")
     parser.add_argument("--skip-hnsw", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

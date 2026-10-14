@@ -1,9 +1,9 @@
-"""Build and evaluate Adaptive TopoHash directly from a trained encoder checkpoint.
+"""Build and evaluate adaptive candidate selection directly from a trained encoder checkpoint.
 
-The script reuses the checkpoint embedding export and post-hoc hash-head
-training pipeline, then evaluates Global Hash, legacy TopoHash, and the
+The script reuses the checkpoint embedding export and post-hoc code-encoder
+training pipeline, then evaluates Code-Scan, the legacy hierarchical route, and the
 adaptive Global-core/topology-rescue methods on the same test split.  The
-``adaptive-dual-metric`` method keeps the Candidate Hash search and adds an
+``adaptive-dual-metric`` method keeps the base-code search and adds an
 independent Metric-Head retrieval only for scheduled low-confidence queries.
 """
 
@@ -22,12 +22,12 @@ from dual_metric_fusion import (
     load_weight_payload,
     save_weight_payload,
 )
-from hier_hash_large_scale import _json_dump, load_embedding_payload
-from topo_route_hash_large_scale import (
+from hierarchical_code_large_scale import _json_dump, load_embedding_payload
+from candidate_selection import (
     METHODS,
     _build_index,
     _evaluate_method,
-    _hash_config,
+    _code_config,
     _row_retrieval_metrics,
     source_retrieval_metrics,
 )
@@ -44,57 +44,57 @@ def _is_embedding_file(path):
         return False
 
 
-def _run_hash_export(args, assets_dir, retrain_only=False):
-    hash_script = osp.join(osp.dirname(__file__), "run_hash_global_all.py")
+def _run_code_export(args, assets_dir, retrain_only=False):
+    code_script = osp.join(osp.dirname(__file__), "run_binary_codes.py")
     command = [
         sys.executable,
-        hash_script,
+        code_script,
         "--model", args.checkpoint,
         "--dataset", args.dataset,
         "--dataset-mode", args.dataset_mode,
         "--distance-type", args.distance_type,
         "--output-dir", assets_dir,
         "--bits", str(args.bits),
-        "--hash-device", args.hash_device,
+        "--code-device", args.code_device,
         "--embedding-batch-size", str(args.embedding_batch_size),
-        "--epochs", str(args.hash_epochs),
-        "--hash-batch-size", str(args.hash_batch_size),
-        "--positive-pool", str(args.hash_positive_pool),
-        "--positives-per-anchor", str(args.hash_positives_per_anchor),
-        "--negatives-per-anchor", str(args.hash_negatives_per_anchor),
-        "--negative-strategy", args.hash_negative_strategy,
-        "--hard-negative-pool", str(args.hash_hard_negative_pool),
-        "--hard-negative-fraction", str(args.hash_hard_negative_fraction),
-        "--metric-distance-weight", str(args.hash_metric_distance_weight),
-        "--metric-distance-scale", str(args.hash_metric_distance_scale),
-        "--embedding-distance-weight", str(args.hash_embedding_distance_weight),
-        "--in-batch-negative-weight", str(args.hash_in_batch_negative_weight),
-        "--graded-rank-weight", str(args.hash_graded_rank_weight),
-        "--graded-rank-margin", str(args.hash_graded_rank_margin),
-        "--graded-rank-cutoffs", args.hash_graded_rank_cutoffs,
-        "--cutoff-rank-weight", str(args.hash_cutoff_rank_weight),
-        "--cutoff-rank", str(args.hash_cutoff_rank),
-        "--cutoff-rank-margin", str(args.hash_cutoff_rank_margin),
-        "--cutoff-rank-window", str(args.hash_cutoff_rank_window),
-        "--cutoff-samples", str(args.hash_cutoff_samples),
+        "--epochs", str(args.code_epochs),
+        "--code-batch-size", str(args.code_batch_size),
+        "--positive-pool", str(args.code_positive_pool),
+        "--positives-per-anchor", str(args.code_positives_per_anchor),
+        "--negatives-per-anchor", str(args.code_negatives_per_anchor),
+        "--negative-strategy", args.code_negative_strategy,
+        "--hard-negative-pool", str(args.code_hard_negative_pool),
+        "--hard-negative-fraction", str(args.code_hard_negative_fraction),
+        "--metric-distance-weight", str(args.code_metric_distance_weight),
+        "--metric-distance-scale", str(args.code_metric_distance_scale),
+        "--embedding-distance-weight", str(args.code_embedding_distance_weight),
+        "--in-batch-negative-weight", str(args.code_in_batch_negative_weight),
+        "--graded-rank-weight", str(args.code_graded_rank_weight),
+        "--graded-rank-margin", str(args.code_graded_rank_margin),
+        "--graded-rank-cutoffs", args.code_graded_rank_cutoffs,
+        "--cutoff-rank-weight", str(args.code_cutoff_rank_weight),
+        "--cutoff-rank", str(args.code_cutoff_rank),
+        "--cutoff-rank-margin", str(args.code_cutoff_rank_margin),
+        "--cutoff-rank-window", str(args.code_cutoff_rank_window),
+        "--cutoff-samples", str(args.code_cutoff_samples),
         "--candidate-embedding-distance-weight",
-        str(args.candidate_hash_embedding_distance_weight),
+        str(args.base_code_embedding_distance_weight),
         "--candidate-in-batch-negative-weight",
-        str(args.candidate_hash_in_batch_negative_weight),
+        str(args.base_code_in_batch_negative_weight),
         "--skip-eval",
     ]
-    if args.dual_hash_heads:
-        command.append("--dual-hash-heads")
+    if args.dual_code_encoders:
+        command.append("--dual-code-encoders")
     if args.validation_file:
         command.extend(["--validation-file", args.validation_file])
-    if args.hash_metric_distance_file:
-        command.extend(["--metric-distance-file", args.hash_metric_distance_file])
-    if args.hash_metric_candidate_teacher_file:
+    if args.code_metric_distance_file:
+        command.extend(["--metric-distance-file", args.code_metric_distance_file])
+    if args.code_metric_candidate_teacher_file:
         command.extend([
             "--metric-candidate-teacher-file",
-            args.hash_metric_candidate_teacher_file,
+            args.code_metric_candidate_teacher_file,
         ])
-    if args.hash_filter_same_source_negatives:
+    if args.code_filter_same_source_negatives:
         command.append("--filter-same-source-negatives")
     if args.test_file:
         command.extend(["--test-file", args.test_file])
@@ -121,15 +121,15 @@ def _run_hash_export(args, assets_dir, retrain_only=False):
             command.append("--force-export")
         if retrain_only:
             command.append("--force-train")
-    print("[adaptive] exporting embeddings and preparing hash assets")
+    print("[adaptive] exporting embeddings and preparing code assets")
     subprocess.run(command, check=True, cwd=osp.dirname(__file__))
     return (
         osp.join(assets_dir, "test_embeddings.npz"),
         osp.join(
             assets_dir,
             (
-                f"hash_head_{args.bits}_metric.pt"
-                if args.dual_hash_heads else f"hash_head_{args.bits}.pt"
+                f"code_encoder_{args.bits}_metric.pt"
+                if args.dual_code_encoders else f"code_encoder_{args.bits}.pt"
             ),
         ),
     )
@@ -311,13 +311,13 @@ def _write_low_confidence_comparison(
     adaptive_method = next(
         (
             method
-            for method in ("adaptive-dual-metric", "adaptive-topo-hash")
+            for method in ("adaptive-dual-metric", "adaptive-selection")
             if method in predictions
         ),
         None,
     )
     no_rerank_method = "adaptive-dual-metric-no-rerank"
-    if adaptive_method is None or "global-hash" not in predictions:
+    if adaptive_method is None or "code-scan" not in predictions:
         return None
     has_no_rerank = no_rerank_method in predictions
     adaptive_result = next(
@@ -352,11 +352,11 @@ def _write_low_confidence_comparison(
             continue
         method_report = {}
         method_specs = [
-            ("global-hash", "global-hash-direct"),
+            ("code-scan", "code-scan-direct"),
             (adaptive_method, "topology-tp-rerank"),
         ]
         if has_no_rerank:
-            method_specs.append((no_rerank_method, "dual-hash-no-rerank"))
+            method_specs.append((no_rerank_method, "dual-code-no-rerank"))
         for method_name, method_label in method_specs:
             method_result = next(
                 result for result in results if result["method"] == method_name
@@ -373,7 +373,7 @@ def _write_low_confidence_comparison(
                 ),
                 "full_method_mean_ms": method_result["latency_ms"]["mean"],
             }
-        global_metrics = method_report["global-hash-direct"]["metrics"]
+        global_metrics = method_report["code-scan-direct"]["metrics"]
         rerank_metrics = method_report["topology-tp-rerank"]["metrics"]
         method_report["delta_rerank_minus_global"] = {
             key: float(rerank_metrics[key] - global_metrics[key])
@@ -381,7 +381,7 @@ def _write_low_confidence_comparison(
             if key in global_metrics and key != "queries"
         }
         if has_no_rerank:
-            no_rerank_metrics = method_report["dual-hash-no-rerank"]["metrics"]
+            no_rerank_metrics = method_report["dual-code-no-rerank"]["metrics"]
             method_report["delta_no_rerank_minus_global"] = {
                 key: float(no_rerank_metrics[key] - global_metrics[key])
                 for key in no_rerank_metrics
@@ -415,8 +415,8 @@ def _write_low_confidence_comparison(
         "eligible_trajectory_values": trajectory_values,
         "eligible_trajectory_offsets": trajectory_offsets,
         "reranked_positions_in_eligible": reranked_positions,
-        "global_hash_predictions": np.asarray(
-            [predictions["global-hash"][int(index)] for index in eligible_indices],
+        "code_scan_predictions": np.asarray(
+            [predictions["code-scan"][int(index)] for index in eligible_indices],
             dtype=np.int64,
         ),
         "topology_tp_predictions": np.asarray(
@@ -425,7 +425,7 @@ def _write_low_confidence_comparison(
         ),
     }
     if has_no_rerank:
-        save_payload["dual_hash_no_rerank_predictions"] = np.asarray(
+        save_payload["dual_code_no_rerank_predictions"] = np.asarray(
             [predictions[no_rerank_method][int(index)] for index in eligible_indices],
             dtype=np.int64,
         )
@@ -444,7 +444,7 @@ def _write_low_confidence_comparison(
         "artifact": osp.abspath(artifact_file),
     }
     if has_no_rerank:
-        report["definition"]["dual_hash_no_rerank"] = (
+        report["definition"]["dual_code_no_rerank"] = (
             "eligible queries sent through Global + Metric-Head + topology "
             "candidate fusion without TP reranking"
         )
@@ -472,26 +472,26 @@ def _metric_args(args, trajectories):
     )
 
 
-def _attach_metric_hash(index, payload, model_file, args, topo_args):
+def _attach_metric_code(index, payload, model_file, args, topo_args):
     """Attach the independent metric head and encode validation/query codes."""
-    from hash_global import (
-        HashGlobalIndex,
+    from binary_codes import (
+        BinaryCodeIndex,
         encode_binary_codes,
         encode_soft_codes,
-        load_hash_head,
+        load_code_encoder,
     )
 
-    metric_head, _ = load_hash_head(model_file)
-    if metric_head.config.bits != index.hash_index.config.bits:
+    metric_head, _ = load_code_encoder(model_file)
+    if metric_head.config.bits != index.code_index.config.bits:
         raise ValueError(
-            "Candidate and metric-prefilter hash heads must use the same bit count."
+            "Base and metric-prefilter code encoders must use the same bit count."
         )
-    index.metric_hash_index = HashGlobalIndex(
-        _hash_config(topo_args, metric_head)
+    index.metric_code_index = BinaryCodeIndex(
+        _code_config(topo_args, metric_head)
     ).build(
         payload["embeddings"],
         metric_head,
-        encode_device=args.hash_device,
+        encode_device=args.code_device,
         metadata={"role": "adaptive-dual-metric"},
     )
     packed_codes = encode_binary_codes(
@@ -500,7 +500,7 @@ def _attach_metric_hash(index, payload, model_file, args, topo_args):
         batch_size=args.encode_batch_size,
         device=args.query_code_device,
     )
-    if args.metric_prefilter_hash_score == "soft":
+    if args.metric_prefilter_code_score == "soft":
         score_codes = encode_soft_codes(
             metric_head,
             payload["embeddings"],
@@ -519,13 +519,13 @@ def _fit_or_load_dual_metric_weights(
     args,
     topo_args,
     validation_embedding_file,
-    metric_hash_model_file,
+    metric_code_model_file,
 ):
     if not args.learn_dual_metric_weights:
         return None, None
-    if not metric_hash_model_file:
+    if not metric_code_model_file:
         raise ValueError(
-            "Learned dual-metric weights require an independent metric hash head."
+            "Learned dual-metric weights require an independent metric code encoder."
         )
     mode = "learned-bucket" if args.dual_metric_weight_per_bucket else "learned-global"
     weight_file = args.dual_metric_weight_file or osp.join(
@@ -547,7 +547,7 @@ def _fit_or_load_dual_metric_weights(
             f"{validation_embedding_file}"
         )
 
-    from hash_global import encode_binary_codes
+    from binary_codes import encode_binary_codes
 
     validation = load_embedding_payload(validation_embedding_file, role="query")
     validation_rows = np.arange(len(validation["embeddings"]), dtype=np.int64)
@@ -557,13 +557,13 @@ def _fit_or_load_dual_metric_weights(
     )
     fit_index.exclude_self = bool(args.exclude_self)
     candidate_codes = encode_binary_codes(
-        fit_index.hash_index.head,
+        fit_index.code_index.head,
         validation["embeddings"],
         batch_size=args.encode_batch_size,
         device=args.query_code_device,
     )
-    metric_score_codes, metric_hash_codes = _attach_metric_hash(
-        fit_index, validation, metric_hash_model_file, args, topo_args
+    metric_score_codes, metric_binary_codes = _attach_metric_code(
+        fit_index, validation, metric_code_model_file, args, topo_args
     )
     validation_anchor_count = validation.get("anchor_count")
     if validation_anchor_count is None:
@@ -602,7 +602,7 @@ def _fit_or_load_dual_metric_weights(
                 validation["embeddings"][query_id],
                 validation["trajectories"][query_id],
                 candidate_codes[query_id],
-                metric_hash_codes[query_id],
+                metric_binary_codes[query_id],
                 top_k=args.top_k,
                 metric_backend=metric_backend,
                 metric_query_code=metric_score_codes[query_id],
@@ -659,7 +659,7 @@ def _fit_or_load_dual_metric_weights(
         )
     initial_weights = (
         args.dual_metric_embedding_weight,
-        args.dual_metric_hash_weight,
+        args.dual_metric_code_weight,
         args.dual_metric_topology_weight,
     )
     payload = fit_weight_payload(
@@ -772,89 +772,89 @@ def run(args):
         args.edge_file = osp.join("dataset", args.dataset, "edge_weight.csv")
     if args.neterp_anchor_node is None and args.dataset == "beijing":
         args.neterp_anchor_node = 72526
-    if args.reuse_hash_assets_dir:
-        assets_dir = args.reuse_hash_assets_dir
+    if args.reuse_code_assets_dir:
+        assets_dir = args.reuse_code_assets_dir
         validation_embedding_file = osp.join(
             assets_dir, "validation_embeddings.npz"
         )
         test_file = osp.join(assets_dir, "test_embeddings.npz")
-        hash_model_file = osp.join(
+        code_model_file = osp.join(
             assets_dir,
             (
-                f"hash_head_{args.bits}_metric.pt"
-                if args.dual_hash_heads else f"hash_head_{args.bits}.pt"
+                f"code_encoder_{args.bits}_metric.pt"
+                if args.dual_code_encoders else f"code_encoder_{args.bits}.pt"
             ),
         )
         default_candidate_model_file = osp.join(
             assets_dir,
             (
-                f"hash_head_{args.bits}_candidate.pt"
-                if args.dual_hash_heads else f"hash_head_{args.bits}.pt"
+                f"code_encoder_{args.bits}_base.pt"
+                if args.dual_code_encoders else f"code_encoder_{args.bits}.pt"
             ),
         )
         default_metric_model_file = (
-            hash_model_file if args.dual_hash_heads else None
+            code_model_file if args.dual_code_encoders else None
         )
         external_validation_embeddings = _is_embedding_file(args.validation_file)
         required_assets = []
         if not args.reexport_embeddings:
             required_assets.append(test_file)
-            if args.retrain_hash:
+            if args.retrain_codes:
                 if not external_validation_embeddings:
                     required_assets.append(validation_embedding_file)
             else:
                 required_assets.append(
-                    args.candidate_hash_model_file or default_candidate_model_file
+                    args.base_code_model_file or default_candidate_model_file
                 )
                 metric_file = (
-                    args.metric_prefilter_hash_model_file or default_metric_model_file
+                    args.metric_prefilter_code_model_file or default_metric_model_file
                 )
                 if metric_file:
                     required_assets.append(metric_file)
         missing = [path for path in required_assets if not osp.isfile(path)]
         if missing:
             raise FileNotFoundError(
-                f"Reusable hash assets are incomplete; missing: {missing}"
+                f"Reusable code assets are incomplete; missing: {missing}"
             )
-        print(f"[adaptive] reusing hash assets: {assets_dir}")
-        if args.retrain_hash:
+        print(f"[adaptive] reusing code assets: {assets_dir}")
+        if args.retrain_codes:
             print(
-                "[adaptive] --retrain-hash enabled: forcing metric and candidate "
-                "hash-head training"
+                "[adaptive] --retrain-codes enabled: forcing metric and base "
+                "code-encoder training"
             )
-        if args.retrain_hash or args.reexport_embeddings:
-            test_file, hash_model_file = _run_hash_export(
-                args, assets_dir, retrain_only=args.retrain_hash
+        if args.retrain_codes or args.reexport_embeddings:
+            test_file, code_model_file = _run_code_export(
+                args, assets_dir, retrain_only=args.retrain_codes
             )
     else:
-        assets_dir = osp.join(args.output_dir, "hash_assets")
-        test_file, hash_model_file = _run_hash_export(args, assets_dir)
+        assets_dir = osp.join(args.output_dir, "code_assets")
+        test_file, code_model_file = _run_code_export(args, assets_dir)
     validation_embedding_file = (
         args.validation_file
         if _is_embedding_file(args.validation_file)
         else osp.join(assets_dir, "validation_embeddings.npz")
     )
-    trained_hash_model_file = hash_model_file
+    trained_code_model_file = code_model_file
     default_candidate_model_file = osp.join(
         assets_dir,
         (
-            f"hash_head_{args.bits}_candidate.pt"
-            if args.dual_hash_heads else f"hash_head_{args.bits}.pt"
+            f"code_encoder_{args.bits}_base.pt"
+            if args.dual_code_encoders else f"code_encoder_{args.bits}.pt"
         ),
     )
-    candidate_hash_model_file = (
-        args.candidate_hash_model_file or default_candidate_model_file
+    base_code_model_file = (
+        args.base_code_model_file or default_candidate_model_file
     )
-    metric_prefilter_hash_model_file = (
-        args.metric_prefilter_hash_model_file
-        or (trained_hash_model_file if args.dual_hash_heads else None)
+    metric_prefilter_code_model_file = (
+        args.metric_prefilter_code_model_file
+        or (trained_code_model_file if args.dual_code_encoders else None)
     )
     for role, path in (
-        ("candidate", candidate_hash_model_file),
-        ("metric prefilter", metric_prefilter_hash_model_file),
+        ("candidate", base_code_model_file),
+        ("metric prefilter", metric_prefilter_code_model_file),
     ):
         if path and not osp.isfile(path):
-            raise FileNotFoundError(f"{role} hash model not found: {path}")
+            raise FileNotFoundError(f"{role} code model not found: {path}")
     payload = load_embedding_payload(test_file, role="query")
     if args.max_queries > 0:
         limit = min(args.max_queries, len(payload["embeddings"]))
@@ -867,8 +867,8 @@ def run(args):
 
     selected_rows = np.arange(len(payload["embeddings"]), dtype=np.int64)
     topo_args = SimpleNamespace(
-        hash_model_file=candidate_hash_model_file,
-        hash_device=args.hash_device,
+        code_model_file=base_code_model_file,
+        code_device=args.code_device,
         hierarchy_dir=args.hierarchy_dir,
         candidate_source=args.candidate_source,
         qgram=args.qgram,
@@ -905,8 +905,8 @@ def run(args):
         metric_prefilter_global_protect=args.metric_prefilter_global_protect,
         metric_prefilter_structural_protect=args.metric_prefilter_structural_protect,
         metric_prefilter_embedding_weight=args.metric_prefilter_embedding_weight,
-        metric_prefilter_hash_weight=args.metric_prefilter_hash_weight,
-        metric_prefilter_hash_score=args.metric_prefilter_hash_score,
+        metric_prefilter_code_weight=args.metric_prefilter_code_weight,
+        metric_prefilter_code_score=args.metric_prefilter_code_score,
         metric_prefilter_soft_temperature=args.metric_prefilter_soft_temperature,
         dual_metric_search_candidates=args.dual_metric_search_candidates,
         dual_metric_candidates=args.dual_metric_candidates,
@@ -919,15 +919,15 @@ def run(args):
         dual_metric_head_protect=args.dual_metric_head_protect,
         dual_metric_structural_protect=args.dual_metric_structural_protect,
         dual_metric_embedding_weight=args.dual_metric_embedding_weight,
-        dual_metric_hash_weight=args.dual_metric_hash_weight,
+        dual_metric_code_weight=args.dual_metric_code_weight,
         dual_metric_topology_weight=args.dual_metric_topology_weight,
         selection_seed=2026,
         probe_radius=args.probe_radius,
         hamming_candidates=args.hamming_candidates,
-        hash_backend=args.hash_backend,
-        hash_hnsw_m=args.hash_hnsw_m,
-        hash_hnsw_ef_construction=args.hash_hnsw_ef_construction,
-        hash_hnsw_ef_search=args.hash_hnsw_ef_search,
+        code_backend=args.code_backend,
+        code_hnsw_m=args.code_hnsw_m,
+        code_hnsw_ef_construction=args.code_hnsw_ef_construction,
+        code_hnsw_ef_search=args.code_hnsw_ef_search,
         metric=args.embedding_metric,
         normalize=args.normalize,
         embedding_storage=args.embedding_storage,
@@ -951,51 +951,51 @@ def run(args):
             numba_status = "unavailable; Python/NumPy fallback"
         print(f"[adaptive] TP backend: flattened exact_tp_distances, Numba {numba_status}")
     metric_backend = _metric_args(args, payload["trajectories"])
-    from hash_global import encode_binary_codes, encode_soft_codes
+    from binary_codes import encode_binary_codes, encode_soft_codes
 
     query_codes = encode_binary_codes(
-        index.hash_index.head,
+        index.code_index.head,
         payload["embeddings"],
         batch_size=args.encode_batch_size,
         device=args.query_code_device,
     )
     query_metric_codes = None
-    query_metric_hash_codes = None
-    if metric_prefilter_hash_model_file:
-        query_metric_codes, query_metric_hash_codes = _attach_metric_hash(
+    query_metric_binary_codes = None
+    if metric_prefilter_code_model_file:
+        query_metric_codes, query_metric_binary_codes = _attach_metric_code(
             index,
             payload,
-            metric_prefilter_hash_model_file,
+            metric_prefilter_code_model_file,
             args,
             topo_args,
         )
         print(
-            "[adaptive] dual hash heads: candidate=%s, metric-prefilter=%s"
-            % (candidate_hash_model_file, metric_prefilter_hash_model_file)
+            "[adaptive] dual code encoders: base=%s, metric-prefilter=%s"
+            % (base_code_model_file, metric_prefilter_code_model_file)
         )
         print(
-            "[adaptive] metric prefilter hash score: %s"
-            % args.metric_prefilter_hash_score
+            "[adaptive] metric prefilter code score: %s"
+            % args.metric_prefilter_code_score
         )
     elif (
-        args.metric_prefilter_hash_score == "soft"
-        and args.metric_prefilter_hash_weight > 0.0
+        args.metric_prefilter_code_score == "soft"
+        and args.metric_prefilter_code_weight > 0.0
     ):
         index.metric_prefilter_soft_codes = encode_soft_codes(
-            index.hash_index.head,
+            index.code_index.head,
             payload["embeddings"],
             batch_size=args.encode_batch_size,
             device=args.query_code_device,
             temperature=args.metric_prefilter_soft_temperature,
         )
         query_metric_codes = index.metric_prefilter_soft_codes
-        print("[adaptive] soft metric prefilter uses the candidate head fallback")
+        print("[adaptive] soft metric prefilter uses the base encoder fallback")
     learned_weight_payload, learned_weight_file = (
         _fit_or_load_dual_metric_weights(
             args,
             topo_args,
             validation_embedding_file,
-            metric_prefilter_hash_model_file,
+            metric_prefilter_code_model_file,
         )
     )
     if learned_weight_payload is not None:
@@ -1013,10 +1013,10 @@ def run(args):
             raise ValueError(
                 "adaptive-dual-metric requires a non-embedding --rerank-metric."
             )
-        if index.metric_hash_index is None or query_metric_hash_codes is None:
+        if index.metric_code_index is None or query_metric_binary_codes is None:
             raise ValueError(
-                "adaptive-dual-metric requires --dual-hash-heads or an explicit "
-                "--metric-prefilter-hash-model-file."
+                "adaptive-dual-metric requires --dual-code-encoders or an explicit "
+                "--metric-prefilter-code-model-file."
             )
     results = []
     predictions = {}
@@ -1038,11 +1038,11 @@ def run(args):
             query_scale_weights=payload.get("scale_weights"),
             metric_backend=metric_backend,
             query_metric_codes=query_metric_codes,
-            query_metric_hash_codes=query_metric_hash_codes,
+            query_metric_binary_codes=query_metric_binary_codes,
         )
         result["rerank_metric"] = (
             args.rerank_metric
-            if method in {"adaptive-topo-hash", "adaptive-dual-metric"}
+            if method in {"adaptive-selection", "adaptive-dual-metric"}
             else None
         )
         results.append(result)
@@ -1107,7 +1107,7 @@ def run(args):
             )
         if low_confidence_delta_rows:
             _print_table(
-                "low-confidence delta (topology-tp-rerank - global-hash-direct)",
+                "low-confidence delta (topology-tp-rerank - code-scan-direct)",
                 low_confidence_delta_rows,
                 [
                     "subset", "HR@10", "HR@50", "R10@50", "R1@1",
@@ -1128,7 +1128,7 @@ def run(args):
                     })
             if low_confidence_no_rerank_delta_rows:
                 _print_table(
-                    "low-confidence delta (dual-hash-no-rerank - global-hash-direct)",
+                    "low-confidence delta (dual-code-no-rerank - code-scan-direct)",
                     low_confidence_no_rerank_delta_rows,
                     [
                         "subset", "HR@10", "HR@50", "R10@50", "R1@1",
@@ -1136,14 +1136,14 @@ def run(args):
                     ],
                 )
     output = {
-        "protocol": "adaptive_topo_hash_checkpoint_eval",
+        "protocol": "candidate_selection_checkpoint_eval",
         "checkpoint": osp.abspath(args.checkpoint),
         "embedding_file": osp.abspath(test_file),
-        "hash_model_file": osp.abspath(candidate_hash_model_file),
-        "trained_hash_model_file": osp.abspath(trained_hash_model_file),
-        "metric_prefilter_hash_model_file": (
-            osp.abspath(metric_prefilter_hash_model_file)
-            if metric_prefilter_hash_model_file else None
+        "code_model_file": osp.abspath(base_code_model_file),
+        "trained_code_model_file": osp.abspath(trained_code_model_file),
+        "metric_prefilter_code_model_file": (
+            osp.abspath(metric_prefilter_code_model_file)
+            if metric_prefilter_code_model_file else None
         ),
         "rerank_metric": args.rerank_metric,
         "dual_metric_learned_weights": {
@@ -1178,8 +1178,8 @@ def run(args):
                 "metric_prefilter_structural_protect",
                 "metric_prefilter_high_quality_candidates",
                 "metric_prefilter_embedding_weight",
-                "metric_prefilter_hash_weight",
-                "metric_prefilter_hash_score",
+                "metric_prefilter_code_weight",
+                "metric_prefilter_code_score",
                 "metric_prefilter_soft_temperature",
                 "dual_metric_search_candidates",
                 "dual_metric_candidates",
@@ -1190,7 +1190,7 @@ def run(args):
                 "dual_metric_head_protect",
                 "dual_metric_structural_protect",
                 "dual_metric_embedding_weight",
-                "dual_metric_hash_weight",
+                "dual_metric_code_weight",
                 "dual_metric_topology_weight",
                 "learn_dual_metric_weights",
                 "dual_metric_weight_file",
@@ -1227,22 +1227,22 @@ def parse_args():
     parser.add_argument("--distance-type", default="TP", choices=["TP", "DITA", "discret_frechet", "LCRS", "NetERP"])
     parser.add_argument("--validation-file", default=None)
     parser.add_argument("--test-file", default=None)
-    parser.add_argument("--hash-metric-distance-file", default=None)
-    parser.add_argument("--hash-metric-candidate-teacher-file", default=None)
+    parser.add_argument("--code-metric-distance-file", default=None)
+    parser.add_argument("--code-metric-candidate-teacher-file", default=None)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
-        "--reuse-hash-assets-dir",
+        "--reuse-code-assets-dir",
         default=None,
         help=(
             "Reuse an existing directory containing test_embeddings.npz and "
-            "hash_head_<bits>.pt instead of exporting/training again."
+            "code_encoder_<bits>.pt instead of exporting/training again."
         ),
     )
     parser.add_argument(
-        "--retrain-hash",
+        "--retrain-codes",
         action="store_true",
         help=(
-            "Force retraining of the Candidate/Metric hash heads from the "
+            "Force retraining of the base/metric code encoders from the "
             "existing validation embeddings; the trajectory encoder and embeddings "
             "are reused. Combine with --reexport-embeddings if the checkpoint "
             "or encoder settings changed."
@@ -1253,30 +1253,30 @@ def parse_args():
         action="store_true",
         help=(
             "Re-export validation/test embeddings into the reused asset directory. "
-            "Use with --retrain-hash when the checkpoint or encoder settings changed."
+            "Use with --retrain-codes when the checkpoint or encoder settings changed."
         ),
     )
     parser.add_argument(
-        "--dual-hash-heads",
+        "--dual-code-encoders",
         action="store_true",
         help=(
-            "Train/load hash_head_<bits>_candidate.pt for global hash retrieval and "
-            "hash_head_<bits>_metric.pt for learned metric prefiltering."
+            "Train/load code_encoder_<bits>_base.pt for code-scan retrieval and "
+            "code_encoder_<bits>_metric.pt for learned metric prefiltering."
         ),
     )
     parser.add_argument(
-        "--candidate-hash-model-file",
+        "--base-code-model-file",
         default=None,
         help=(
-            "Optional baseline hash head used for global hash candidate generation. "
-            "Defaults to hash_head_<bits>.pt in the asset directory."
+            "Optional baseline code encoder used for code-scan candidate generation. "
+            "Defaults to code_encoder_<bits>.pt in the asset directory."
         ),
     )
     parser.add_argument(
-        "--metric-prefilter-hash-model-file",
+        "--metric-prefilter-code-model-file",
         default=None,
         help=(
-            "Optional TP-distilled hash head used only for metric-prefilter "
+            "Optional TP-distilled code encoder used only for metric-prefilter "
             "Hamming scores. Enables the dual-head path."
         ),
     )
@@ -1286,40 +1286,40 @@ def parse_args():
         help="Hierarchy directory; defaults to dataset/<dataset>/hierarchy_louvain.",
     )
     parser.add_argument("--cuda", default=None)
-    parser.add_argument("--hash-device", default="cpu")
+    parser.add_argument("--code-device", default="cpu")
     parser.add_argument("--query-code-device", default="cpu")
     parser.add_argument("--embedding-batch-size", type=int, default=256)
-    parser.add_argument("--hash-epochs", type=int, default=30)
-    parser.add_argument("--hash-batch-size", type=int, default=512)
-    parser.add_argument("--hash-positive-pool", type=int, default=10)
-    parser.add_argument("--hash-positives-per-anchor", type=int, default=1)
-    parser.add_argument("--hash-negatives-per-anchor", type=int, default=1)
+    parser.add_argument("--code-epochs", type=int, default=30)
+    parser.add_argument("--code-batch-size", type=int, default=512)
+    parser.add_argument("--code-positive-pool", type=int, default=10)
+    parser.add_argument("--code-positives-per-anchor", type=int, default=1)
+    parser.add_argument("--code-negatives-per-anchor", type=int, default=1)
     parser.add_argument(
-        "--hash-negative-strategy",
+        "--code-negative-strategy",
         choices=["random", "metric-hard", "mixed"],
         default="random",
     )
-    parser.add_argument("--hash-hard-negative-pool", type=int, default=0)
-    parser.add_argument("--hash-hard-negative-fraction", type=float, default=0.5)
-    parser.add_argument("--hash-metric-distance-weight", type=float, default=0.0)
-    parser.add_argument("--hash-metric-distance-scale", type=float, default=0.0)
-    parser.add_argument("--hash-embedding-distance-weight", type=float, default=1.0)
+    parser.add_argument("--code-hard-negative-pool", type=int, default=0)
+    parser.add_argument("--code-hard-negative-fraction", type=float, default=0.5)
+    parser.add_argument("--code-metric-distance-weight", type=float, default=0.0)
+    parser.add_argument("--code-metric-distance-scale", type=float, default=0.0)
+    parser.add_argument("--code-embedding-distance-weight", type=float, default=1.0)
     parser.add_argument(
-        "--candidate-hash-embedding-distance-weight", type=float, default=1.0
+        "--base-code-embedding-distance-weight", type=float, default=1.0
     )
     parser.add_argument(
-        "--candidate-hash-in-batch-negative-weight", type=float, default=0.25
+        "--base-code-in-batch-negative-weight", type=float, default=0.25
     )
-    parser.add_argument("--hash-in-batch-negative-weight", type=float, default=0.0)
-    parser.add_argument("--hash-graded-rank-weight", type=float, default=0.0)
-    parser.add_argument("--hash-graded-rank-margin", type=float, default=0.05)
-    parser.add_argument("--hash-graded-rank-cutoffs", default="10,20,50")
-    parser.add_argument("--hash-cutoff-rank-weight", type=float, default=0.0)
-    parser.add_argument("--hash-cutoff-rank", type=int, default=192)
-    parser.add_argument("--hash-cutoff-rank-margin", type=float, default=0.02)
-    parser.add_argument("--hash-cutoff-rank-window", type=int, default=64)
-    parser.add_argument("--hash-cutoff-samples", type=int, default=4)
-    parser.add_argument("--hash-filter-same-source-negatives", action="store_true")
+    parser.add_argument("--code-in-batch-negative-weight", type=float, default=0.0)
+    parser.add_argument("--code-graded-rank-weight", type=float, default=0.0)
+    parser.add_argument("--code-graded-rank-margin", type=float, default=0.05)
+    parser.add_argument("--code-graded-rank-cutoffs", default="10,20,50")
+    parser.add_argument("--code-cutoff-rank-weight", type=float, default=0.0)
+    parser.add_argument("--code-cutoff-rank", type=int, default=192)
+    parser.add_argument("--code-cutoff-rank-margin", type=float, default=0.02)
+    parser.add_argument("--code-cutoff-rank-window", type=int, default=64)
+    parser.add_argument("--code-cutoff-samples", type=int, default=4)
+    parser.add_argument("--code-filter-same-source-negatives", action="store_true")
     parser.add_argument("--bits", type=int, default=128)
     parser.add_argument("--seq-encoder", default="hmt")
     parser.add_argument("--graph-encoder", default="hybrid_multilevel")
@@ -1344,7 +1344,7 @@ def parse_args():
     parser.add_argument("--truth-file", default=None)
     parser.add_argument(
         "--methods",
-        default="adaptive-topo-hash,global-hash,exact",
+        default="adaptive-selection,code-scan,exact",
         help=(
             "Comma-separated methods. Use adaptive-dual-metric for the independent "
             "Metric-Head rescue path."
@@ -1365,12 +1365,12 @@ def parse_args():
     parser.add_argument("--probe-radius", type=int, choices=[0, 1, 2], default=1)
     parser.add_argument("--hamming-candidates", type=int, default=2048)
     parser.add_argument(
-        "--hash-backend", choices=["mih", "hnsw"], default="mih",
+        "--code-backend", choices=["mih", "hnsw"], default="mih",
         help="Use full-code Hamming HNSW instead of MIH hash-table probing.",
     )
-    parser.add_argument("--hash-hnsw-m", type=int, default=16)
-    parser.add_argument("--hash-hnsw-ef-construction", type=int, default=200)
-    parser.add_argument("--hash-hnsw-ef-search", type=int, default=256)
+    parser.add_argument("--code-hnsw-m", type=int, default=16)
+    parser.add_argument("--code-hnsw-ef-construction", type=int, default=200)
+    parser.add_argument("--code-hnsw-ef-search", type=int, default=256)
     parser.add_argument("--embedding-storage", choices=["float16", "float32"], default="float16")
     parser.add_argument("--encode-batch-size", type=int, default=4096)
     parser.add_argument("--qgram", type=int, default=2)
@@ -1439,7 +1439,7 @@ def parse_args():
         "--adaptive-preserve-global-top50",
         action="store_true",
         help=(
-            "Protect the Global Hash embedding Top-50 in adaptive metric rerank "
+            "Protect the Code-Scan embedding Top-50 in adaptive metric rerank "
             "pools. Requires a non-embedding rerank metric and candidate budgets "
             "of at least 50."
         ),
@@ -1486,16 +1486,16 @@ def parse_args():
         help="Weight for normalized embedding distance in metric prefilter.",
     )
     parser.add_argument(
-        "--metric-prefilter-hash-weight", type=float, default=0.0,
-        help="Weight for learned hash Hamming rank in metric prefilter.",
+        "--metric-prefilter-code-weight", type=float, default=0.0,
+        help="Weight for learned code Hamming rank in metric prefilter.",
     )
     parser.add_argument(
-        "--metric-prefilter-hash-score", choices=["hamming", "soft"], default="hamming",
-        help="Use packed Hamming or continuous tanh-code distance for hash prefiltering.",
+        "--metric-prefilter-code-score", choices=["hamming", "soft"], default="hamming",
+        help="Use packed Hamming or continuous tanh-code distance for code prefiltering.",
     )
     parser.add_argument(
         "--metric-prefilter-soft-temperature", type=float, default=1.0,
-        help="Temperature used when encoding continuous metric-head hash codes.",
+        help="Temperature used when encoding continuous metric binary codes.",
     )
     parser.add_argument(
         "--dual-metric-search-candidates", type=int, default=256,
@@ -1534,8 +1534,8 @@ def parse_args():
         help="Embedding rank weight in dual-route candidate fusion.",
     )
     parser.add_argument(
-        "--dual-metric-hash-weight", type=float, default=0.40,
-        help="Metric-Head hash rank weight in dual-route candidate fusion.",
+        "--dual-metric-code-weight", type=float, default=0.40,
+        help="Metric-code rank weight in dual-route candidate fusion.",
     )
     parser.add_argument(
         "--dual-metric-topology-weight", type=float, default=0.20,
